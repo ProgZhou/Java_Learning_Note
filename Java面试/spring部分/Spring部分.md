@@ -538,6 +538,110 @@ scope即为bean的作用域，常见的有singleton和prototype
 
 
 
+### 总结
+
+在没有BeanPostProcessor之前：
+
+```java
+@Component
+@Slf4j
+public class LifeCycleBean {
+    /*
+    * 如果没有配置bean的后处理器，那么执行顺序会是：
+    * 1. 构造方法
+    * 2. 依赖注入
+    * 3. 初始化方法
+    * 4. 在spring容器关闭时，调用销毁方法
+    * */
+
+    //构造方法
+    public LifeCycleBean() {
+        log.debug("构造方法...");
+    }
+
+    //依赖注入
+    @Autowired
+    public void autowire(@Value("${JAVA_HOME}") String path) {
+        log.debug("依赖注入: {}", path);
+    }
+
+    //初始化方法
+    @PostConstruct
+    public void init() {
+        log.debug("初始化方法...");
+    }
+
+    //销毁方法
+    @PreDestroy
+    public void destroy() {
+        log.debug("销毁方法...");
+    }
+
+}
+```
+
+BeanPostProcessor的增强方法
+
+```java
+@Component
+@Slf4j
+public class MyBeanPostProcessor implements InstantiationAwareBeanPostProcessor, DestructionAwareBeanPostProcessor {
+
+    //在bean销毁之前执行
+    @Override
+    public void postProcessBeforeDestruction(Object bean, String beanName) throws BeansException {
+        if(beanName.equals("lifeCycleBean")) {
+            log.debug("<<<<<<<<销毁之前执行，就比如@PreDestroy");
+        }
+    }
+
+    //在bean的构造方法执行之前执行
+    @Override
+    public Object postProcessBeforeInstantiation(Class<?> beanClass, String beanName) throws BeansException {
+        if (beanName.equals("lifeCycleBean")) {
+            log.debug("<<<<<<<<在实例化之前执行，这里返回的对象会替换掉容器中原本的bean");
+        }
+        return null;
+    }
+
+    //在bean的构造方法执行之后执行这个方法，如果返回true，则会继续执行后面的依赖注入方法；如果返回false，则不会执行之后的依赖注入方法
+    @Override
+    public boolean postProcessAfterInstantiation(Object bean, String beanName) throws BeansException {
+        if (beanName.equals("lifeCycleBean")) {
+            log.debug("<<<<<<<<在实例化之后执行，如果方法返回false会跳过依赖注入的阶段");
+        }
+        return true;
+    }
+
+    //在依赖注入之前执行，解析一些依赖注入的注解
+    @Override
+    public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) throws BeansException {
+        if (beanName.equals("lifeCycleBean")) {
+            log.debug("<<<<<<<<依赖注入阶段执行，比如@Autowire，@Value，@Resource");
+        }
+        return pvs;
+    }
+
+    //在初始化执行之前执行
+    @Override
+    public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
+        if (beanName.equals("lifeCycleBean")) {
+            log.debug("<<<<<<<<在初始化方法之前执行，这里返回的对象会替换掉容器中原本的bean");
+        }
+        return bean;
+    }
+
+    //在初始化执行之后执行
+    @Override
+    public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
+        if (beanName.equals("lifeCycleBean")) {
+            log.debug("<<<<<<<<在初始化方法执行之后执行，这里返回的对象会替换掉容器中原本的bean");
+        }
+        return bean;
+    }
+}
+```
+
 
 
 
@@ -718,4 +822,238 @@ BeanFactory的特点：
 + 不会主动调用BeanFactory的后处理器
 + 不会主动添加Bean后处理器
 + 不会主动初始化单例对象（第一次调用方法时创建，懒加载）
+
+### 后处理器的执行顺序
+
+首先说明一点，使用@Autowire注解默认是按照类型注入的，如果一个接口有多个实现类，那么只使用@Autowire注解会报错，解决方法是加上@Qualifier("")使用按照名称注入，还有一种方法就是将成员名命名成和类相同的名称
+
+```java
+public interface BeanInterface{}
+
+public class Bean1 implements BeanInterface {}
+public class Bean2 implements BeanInterface {}
+
+public class Bean3 {
+    @Autowire   //使用@Autowire注解会首先按照名称去找，如果找到了就直接注入
+    private BeanInterface bean1;   //这样写注入的就是Bean1
+    
+}
+```
+
+Bean后处理器的执行顺序是：哪个后处理器先加入到beanFactory中，哪个后处理器就先生效
+
+但这个后处理器的执行顺序是可以被改变的
+
+
+
+## 附录3 ApplicationContext的实现类
+
+### ClassPathXmlApplicationContext
+
+顾名思义是在类路径下找到xml配置文件并解析，附带了依赖注入的功能
+
+```java
+ClassPathXmlApplicationContext context =
+        new ClassPathXmlApplicationContext("bean1.xml");
+for (String name : context.getBeanDefinitionNames()) {   //输出容器中有多少bean
+    System.out.println(name);
+}
+
+Bean2 bean2 = context.getBean(Bean2.class);
+System.out.println(bean2);
+System.out.println(bean2.getBean1());
+
+输出：
+bean1
+bean2
+com.spring.source.entity.Bean2@72e5a8e
+com.spring.source.entity.Bean1@54e1c68b
+```
+
+### FileSystemXmlApplicationContext
+
+在磁盘路径下找到xml配置文件，C://或者D://等等
+
+```java
+FileSystemXmlApplicationContext context =
+        new FileSystemXmlApplicationContext("D:\\Java_idea\\JavaSpringBoot\\springboot-source\\src\\main\\resources\\bean1.xml");
+for (String name : context.getBeanDefinitionNames()) {
+    System.out.println(name);
+}
+
+Bean2 bean2 = context.getBean(Bean2.class);
+System.out.println(bean2);
+System.out.println(bean2.getBean1());
+
+输出：
+bean1
+bean2
+com.spring.source.entity.Bean2@72e5a8e
+com.spring.source.entity.Bean1@54e1c68b
+```
+
+在这些实现类中，起始都有一个类去执行读取xml配置并转换为beanDefinition的功能，简化的实现可以看下面的代码
+
+```java
+//ClassPathXmlApplicationContext内部的实现
+//ApplicationContext中都有一个beanFactory属性去完成管理bean的操作
+DefaultListableBeanFactory beanFactory = new DefaultListableBeanFactory();
+System.out.println("读取之前");
+//刚开始时，beanFactory内部没有任何bean
+for (String name : beanFactory.getBeanDefinitionNames()) {
+    System.out.println(name);
+}
+
+//这个类主要去执行读取xml中bean的配置，将这些配置转换为BeanDefinition，并放入指定的beanFactory中
+XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(beanFactory);
+reader.loadBeanDefinitions(new ClassPathResource("bean1.xml"));  //FileSystemXmlApplicationContext只是在这个换成了FileSystemResource
+System.out.println("读取之后");
+for (String name : beanFactory.getBeanDefinitionNames()) {
+    System.out.println(name);
+}
+```
+
+### AnnotationConfigApplicationContext
+
+解析配置类来获取BeanDefinition，与之前两个的区别就是会自动加入几个bean后处理器
+
+```java
+AnnotationConfigApplicationContext context =
+        new AnnotationConfigApplicationContext(BeanConfig.class);
+
+for (String name : context.getBeanDefinitionNames()) {
+    System.out.println(name);
+}
+Bean2 bean2 = context.getBean(Bean2.class);
+System.out.println(bean2);
+System.out.println(bean2.getBean1());
+
+输出：
+org.springframework.context.annotation.internalConfigurationAnnotationProcessor
+org.springframework.context.annotation.internalAutowiredAnnotationProcessor
+org.springframework.context.annotation.internalCommonAnnotationProcessor
+org.springframework.context.event.internalEventListenerProcessor
+org.springframework.context.event.internalEventListenerFactory
+beanConfig
+bean1
+bean2
+com.spring.source.entity.Bean2@480d3575
+com.spring.source.entity.Bean1@f1da57d
+```
+
+### AnnotationConfigServletWebApplicationContext
+
+专门为Web环境准备的ApplicationContext，它的配置类中必须包含三个内容
+
+```java
+@Configuration
+public class WebConfig {
+
+    //创建Web服务器的工程
+    @Bean
+    public ServletWebServerFactory servletWebServerFactory() {
+        return new TomcatServletWebServerFactory();  //Springboot内嵌的Tomcat就是这样创建出来的
+    }
+
+    //前端控制器
+    @Bean
+    public DispatcherServlet dispatcherServlet() {
+        return new DispatcherServlet();
+    }
+
+    //将前端控制器与服务器关联
+    @Bean
+    public DispatcherServletRegistrationBean registrationBean(DispatcherServlet dispatcherServlet) {
+        return new DispatcherServletRegistrationBean(dispatcherServlet, "/");
+    }
+
+    //处理请求的控制器方法
+    @Bean("/hello")
+    public Controller controller() {
+        return (request, response) -> {
+            response.getWriter().println("hello");
+            return null;
+        };
+    }
+
+}
+```
+
+```java
+AnnotationConfigServletWebApplicationContext context =
+        new AnnotationConfigServletWebApplicationContext(WebConfig.class);
+for (String name : context.getBeanDefinitionNames()) {
+    System.out.println(name);
+}
+
+输出：
+org.springframework.context.annotation.internalConfigurationAnnotationProcessor
+org.springframework.context.annotation.internalAutowiredAnnotationProcessor
+org.springframework.context.annotation.internalCommonAnnotationProcessor
+org.springframework.context.event.internalEventListenerProcessor
+org.springframework.context.event.internalEventListenerFactory
+webConfig
+servletWebServerFactory
+dispatcherServlet
+registrationBean
+/hello
+```
+
+### 设计模式 --- 模板方法
+
+可以自己设计一个简单的BeanFactory：
+
+```java
+public class TestTemplateMethod {
+    public static void main(String[] args) {
+        MyBeanFactory beanFactory = new MyBeanFactory();
+        beanFactory.getBean();
+    }
+    static class MyBeanFactory {
+        //模拟一个bean的生命周期
+        public Object getBean() {
+            Object bean = new Object();
+            System.out.println("constructor: " + bean);  //构造方法调用
+            System.out.println("dependency: " + bean);  //依赖注入阶段
+            System.out.println("initialization: " + bean);  //初始化阶段
+            return bean;
+        }
+    }
+}
+```
+
+但这段代码的可扩展性很差，因为如果想要对getBean方法提出一些新的要求，就需要去修改getBean的源代码，添加一些功能，这就非常麻烦，为了解决这样的问题，可以创建一个接口：
+
+```java
+interface BeanPostProcessor {
+    void inject(Object bean);   //对依赖注入阶段做一些扩展
+}
+//修改BeanFactory的代码
+static class MyBeanFactory {
+        //模拟一个bean的生命周期
+        public Object getBean() {
+            Object bean = new Object();
+            System.out.println("constructor: " + bean);  //构造方法调用
+            System.out.println("dependency: " + bean);  //依赖注入阶段
+            //在这个位置调用后处理器中的方法对依赖注入做一个增强
+            for (BeanPostProcessor processor : processors) {
+                processor.inject(bean);
+            }
+            System.out.println("initialization: " + bean);  //初始化阶段
+            return bean;
+        }
+
+        private List<BeanPostProcessor> processors = new ArrayList<>();
+        //添加后处理器
+        public void addBeanPostProcessor(BeanPostProcessor processor) {
+            processors.add(processor);
+        }
+    }
+```
+
+这样，如果向再对getBean方法提出一些新的要求，可以再接口中增加方法，并创建实现类去实现这些方法，然后添加到BeanFactory中，这样BeanFactory就有了多种多样的功能了
+
+
+
+## 附录4 常见的Bean的后处理器
 
