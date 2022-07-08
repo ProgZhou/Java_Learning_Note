@@ -406,6 +406,256 @@ if(lock) {
 
 
 
+
+
+### 分布式锁的应用
+
+首先简单搭建一个商品买卖的环境：就是最基本的Spring boot项目 + redis缓存
+
++ springboot-redis-1
++ springboot-redis-2
+
+两个服务代码一模一样，只有端口号不同
+
+RedisConfig：
+
+```java
+@Configuration
+public class RedisConfig {
+    @Bean
+    public RedisTemplate<String, Serializable> redisTemplate(LettuceConnectionFactory connectionFactory) {
+        RedisTemplate<String, Serializable> redisTemplate = new RedisTemplate<>();
+        redisTemplate.setConnectionFactory(connectionFactory);
+
+        redisTemplate.setKeySerializer(new StringRedisSerializer());
+        redisTemplate.setValueSerializer(new GenericJackson2JsonRedisSerializer());
+        return redisTemplate;
+    }
+}
+```
+
+RedisController
+
+```java
+@RestController
+@Slf4j
+public class RedisController {
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @Value("${server.port}")
+    private String serverPort;
+
+    @GetMapping("/buyGoods")
+    public String buyGoods() {
+        String result = redisTemplate.opsForValue().get("good:0001");//查看库存是否足够
+        int goodNumber = result == null ? 0 : Integer.parseInt(result);
+        if(goodNumber > 0) {       //#1
+            int realNumber = goodNumber - 1;
+            redisTemplate.opsForValue().set("good:0001", String.valueOf(realNumber));
+            log.info("成功购买商品，剩余库存: {}", realNumber);
+            log.info("服务提供端口: {}", serverPort);
+            return "成功购买商品，剩余库存: " + realNumber + "件" + "\t服务提供端口: " + serverPort;
+        }
+        return "商品已售罄 / 活动结束" + "\t服务提供端口: " + serverPort;
+    }
+
+}
+```
+
+**程序在单机版下的问题**
+
+（1）多线程情况下，goodNumber和redisTemplate就是共享资源，多线程竞争下就会出现问题
+
+（2）#1句出就会发生经典的多线程进入循环导致超卖的问题
+
+解决方式：加锁
+
++ synchronized代码块
++ ReentrantLock
+
+理论上两者都可以，但是ReentrantLock更加灵活一些
+
+```java
+private final ReentrantLoock lock = new ReentrantLock();
+if(lock.tryLock(3L, TimeUnit.SECONDS)) {
+    lock.lock();
+    try {
+        //业务逻辑
+        ...
+    } finally {
+        lock.unlock(); //释放锁
+    }
+} else {
+    //没抢到锁的处理
+}
+```
+
+**程序在分布式架构下的问题**
+
+（1）单机版的锁（即synchronized）在每台服务器上都是独立的，锁不住打到其他服务器的请求
+
+使用nginx配置反向代理，实现请求的轮询，分别访问1111和2222
+
+使用jmeter做压测，100个线程分别打到两个微服务上，观察效果
+
+![image-20220707202116972](Redis部分.assets/image-20220707202116972.png)
+
+![image-20220707202128096](Redis部分.assets/image-20220707202128096.png)
+
+可以发现91号商品被卖了两遍，所以单机锁解决不了分布式下的并发问题
+
+解决方法：使用redis作为分布式锁，使用setnx命令：
+
+```java
+@GetMapping("/buyGoods")
+public String buyGoods() {
+
+    //手动加redis锁
+    String value = UUID.randomUUID() + Thread.currentThread().getName();
+    Boolean absent = redisTemplate.opsForValue().setIfAbsent(REDIS_LOCK, value);//value作为加锁者的唯一标识
+
+    if(Boolean.FALSE.equals(absent)) {
+        //未抢到锁时的处理方式
+        return "抢锁失败" + "\t服务提供端口: " + serverPort;
+    }
+
+    String result = redisTemplate.opsForValue().get("good:0001");//查看库存是否足够
+    int goodNumber = result == null ? 0 : Integer.parseInt(result);
+    if(goodNumber > 0) {
+        int realNumber = goodNumber - 1;
+        redisTemplate.opsForValue().set("good:0001", String.valueOf(realNumber));
+        log.info("成功购买商品，剩余库存: {}", realNumber);
+        log.info("服务提供端口: {}", serverPort);
+        redisTemplate.delete(REDIS_LOCK);   //处理完成，解锁
+        return "成功购买商品，剩余库存: " + realNumber + "件" + "\t服务提供端口: " + serverPort;
+    }
+    return "商品已售罄 / 活动结束" + "\t服务提供端口: " + serverPort;
+
+}
+```
+
+（2）加了上述的分布式锁之后，当业务逻辑出现异常，程序在解锁之前退出，出现死锁的情况
+
+两种解决方案：
+
++ 给锁加一个过期时间，这个更好一点，能够避免服务器宕机这种外部异常因素
++ 加try finally块，保证即使程序出现异常，也能够把锁删除，不能阻挡外部异常因素，例如微服务直接宕机
++ 或者两个加起来，双保险
+
+```java
+//手动加redis锁
+String value = UUID.randomUUID() + Thread.currentThread().getName();
+try {
+    
+    Boolean absent = redisTemplate.opsForValue().setIfAbsent(REDIS_LOCK, value);//value作为加锁者的唯一标识
+    //给锁设置过期时间，必须要是这样的原子操作
+    Boolean absent = redisTemplate.opsForValue().setIfAbsent(REDIS_LOCK, value, 5L, TimeUnit.SECONDS);
+
+    if(Boolean.FALSE.equals(absent)) {
+        //未抢到锁时的处理方式
+        return "抢锁失败" + "\t服务提供端口: " + serverPort;
+    }
+
+    String result = redisTemplate.opsForValue().get("good:0001");//查看库存是否足够
+    int goodNumber = result == null ? 0 : Integer.parseInt(result);
+    if(goodNumber > 0) {
+        int realNumber = goodNumber - 1;
+        redisTemplate.opsForValue().set("good:0001", String.valueOf(realNumber));
+        log.info("成功购买商品，剩余库存: {}", realNumber);
+        log.info("服务提供端口: {}", serverPort);
+        return "成功购买商品，剩余库存: " + realNumber + "件" + "\t服务提供端口: " + serverPort;
+    }
+    return "商品已售罄 / 活动结束" + "\t服务提供端口: " + serverPort;
+} finally {
+    //在finally块中释放锁，保证即使程序出现异常，也能够释放锁
+    redisTemplate.delete(REDIS_LOCK);
+}
+```
+
+（3）加了锁过期时间之后，仍然会出现一定的问题，如果服务器执行业务的时间比redis内设置的锁的过期时间还要长，在服务器A执行业务逻辑执行到一半的时候，锁过期了，后面服务器B立即获得了这个锁去执行业务逻辑，当A执行完之后，删除锁时，由于没有进行判断，直接把B拿到的锁删掉了，这就出现了锁误删的情况
+
+解决方法：在删除锁之前，判断这把锁是否是自己的，即判断锁对应的value值
+
+```java
+//在finally块中释放锁，保证即使程序出现异常，也能够释放锁
+if(value.equals(redisTemplate.opsForValue().get(REDIS_LOCK))) {
+    redisTemplate.delete(REDIS_LOCK);
+}
+```
+
+（4）由于判断和删除的操作也不是原子操作，所以，在多线程情况下仍然会发生问题，即在判断的时候进入了if语句，但在删除之前，原有的key已经被删除了
+
+解决方法：redis官方网站上提倡使用lua脚本的方法解决问题，实际生产中也提倡用这种方法
+
+也可以用redis自己的事务解决，即multi，watch，exec命令
+
+```java
+while(true) {   //使用类似乐观锁的机制保证删锁的原子性
+    redisTemplate.watch(REDIS_LOCK);   //监听这个key
+    if(value.equals(redisTemplate.opsForValue().get(REDIS_LOCK))) {
+        redisTemplate.setEnableTransactionSupport(true);  //开启redis事务支持
+        redisTemplate.multi();   //开启redis事务
+        redisTemplate.delete(REDIS_LOCK);
+        List<Object> list = redisTemplate.exec();
+        if(list == null) {   //如果修改没有成功，继续进行下一次尝试
+            continue;
+        }
+    }
+    redisTemplate.unwatch();   //解除监视
+    break;
+}
+
+/*
+使用lua脚本解决问题的代码
+*/
+//解锁时，使用lua脚本删除redis中的key
+    String script = "if redis.call(\"get\",KEYS[1]) == ARGV[1] then return redis.call(\"del\",KEYS[1]) else return 0 end";
+    //redis执行lua脚本的代码，泛型是返回值的类型
+    redisTemplate.execute(new DefaultRedisScript<Integer>(script, Integer.class), Arrays.asList("lock"), uuid);
+```
+
+（5）锁续期问题，在刚开始加锁，给锁设置过期时间时是一个固定值，而生产环境却是不确定的，很有可能造成锁的过期时间小于业务逻辑执行的时间，其中一种解决办法就是加长锁的过期时间，另一种就是锁续期（一般由工具进行封装），在业务逻辑执行的时候，自动判断是否需要将锁的过期时间增加
+
+一般来说setnx + lua脚本的方法已经能够应付大部分的高并发分布式锁的问题，但有一个小细节，在一些大型业务中，为了保证服务的高可用性，redis通常都是部署成集群的形式：一主一从，或者一主多从，当设置锁的时候，在主机上操作，设置完成主机能够立即通知服务设置完成，并不会等待将数据同步到从机上，所以，如果在主机还没有将数据同步到从机上，但回复了服务执行完成这一时间结点，主机宕机，redis的哨兵机制会按照一定的规则选择一个从机作为主机，但新上任的主机还没有锁的数据，这就有可能导致最后删除锁时出现数据异常
+
+解决方法：使用分布式锁工具Redisson
+
+```java
+//手动加redis锁
+        String value = UUID.randomUUID() + Thread.currentThread().getName();
+        RLock redissonLock = redisson.getLock(REDIS_LOCK);
+        redissonLock.lock();   //使用与ReentrantLock相似
+        try {
+
+            String result = redisTemplate.opsForValue().get("good:0001");//查看库存是否足够
+            int goodNumber = result == null ? 0 : Integer.parseInt(result);
+            if(goodNumber > 0) {
+                int realNumber = goodNumber - 1;
+                redisTemplate.opsForValue().set("good:0001", String.valueOf(realNumber));
+                log.info("成功购买商品，剩余库存: {}", realNumber);
+                log.info("服务提供端口: {}", serverPort);
+                return "成功购买商品，剩余库存: " + realNumber + "件" + "\t服务提供端口: " + serverPort;
+            }
+            return "商品已售罄 / 活动结束" + "\t服务提供端口: " + serverPort;
+        } finally {
+
+            redissonLock.unlock();
+        }
+```
+
+在使用之前需要添加配置：
+
+```java
+@Bean
+public Redisson redisson() {
+    Config config = new Config();
+    config.useSingleServer().setAddress("redis://localhost:6379").setDatabase(0);
+    return (Redisson) Redisson.create(config);
+}
+```
+
 ## 附录 Redis作为缓存
 
 为了提升系统的性能，一般会将一些数据放到缓存中，加速访问，而数据库只承担数据持久化的功能做

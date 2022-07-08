@@ -220,3 +220,55 @@ private T setInitialValue() {
 但一般ThreadLocal使用时都会被设置为static的变量，一般不会被垃圾回收器回收，前两种情况发生的也比较少
 
 （3）主动调用remove方法直接清除指定的key-value
+
+### AbstractQueuedSynchronizer
+
+简称AQS，抽象队列同步器，最主要的使用方式就是继承这个类，队列管理抢占锁失败的线程
+
+```java
+public abstract class AbstractQueuedSynchronizer
+    extends AbstractOwnableSynchronizer
+    implements java.io.Serializable 
+```
+
+AQS是用来构建锁或者其他同步器组件的**重量级基础框架及整个JUC体系的基石**，通过内置的FIFO队列来完成资源获取线程的排队工作，并通过一个int类型变量表示持有锁的状态
+
+![image-20220708200505300](JUC多线程部分.assets/image-20220708200505300.png)
+
+AQS的作用：
+
+管理被加锁阻塞的线程，抢到资源的线程直接使用处理业务逻辑，抢不到资源的必然涉及一种排队等待机制，抢占资源失败的线程继续去等待，但等候的线程仍然保留获取锁的可能且获取锁流程仍然在继续（类似于顾客排队用餐）
+
+如果共享资源被占用，就需要一定的阻塞等待唤醒机制来保证锁分配，这个机制主要用的是CLH队列的变体实现，将暂时获取不到锁的线程加入到队列中，这个队列就是AQS的抽象表现，它将请求共享资源的线程封装成队列的结点，**通过CAS，自旋以及LockSupport.park()的方式**，维护state变量的状态，使并发打到同步的控制效果
+
+
+
+AQS使用一个volatile的int类型的成员变量来表示同步状态
+
+```java
+/**
+ * The synchronization state.
+ */
+private volatile int state;
+```
+
+通过内置的FIFO队列来完成资源获取的排队工作将每个要去抢占资源的线程封装成一个Node结点来实现锁的分配，通过CAS完成对State值的修改
+
+```java
+//内置的一个队列结点类
+static final class Node {
+    //... 
+    //双向链表
+    volatile Node prev;
+
+    volatile Node next;
+	//封装线程
+    volatile Thread thread;
+	
+    //...
+}
+protected final boolean compareAndSetState(int expect, int update) {
+    return STATE.compareAndSet(this, expect, update);
+}
+```
+
