@@ -264,6 +264,9 @@ static final class Node {
     volatile Node next;
 	//封装线程
     volatile Thread thread;
+    
+    //每个线程的等待状态，默认为0
+    volatile int waitStatus;
 	
     //...
 }
@@ -272,3 +275,211 @@ protected final boolean compareAndSetState(int expect, int update) {
 }
 ```
 
+**总结**
+
+AQS的内部结构总结起来就是：
+
+![image-20220711191124533](JUC多线程部分.assets/image-20220711191124533.png)
+
+### ReentrantLock的实现原理
+
+Lock接口的实现类，基本都是通过聚合了一个队列同步器的子类完成线程的访问控制的
+
+```java
+public class ReentrantLock implements Lock, java.io.Serializable {
+ 	...
+    private final Sync sync;
+    abstract static class Sync extends AbstractQueuedSynchronizer {
+   		...
+    }
+    
+    ...
+}
+```
+
+```java
+ReentrantLock lock = new ReentrantLock();   //默认是非公平锁
+public ReentrantLock() {
+    sync = new NonfairSync();
+}
+//true是公平锁  false是非公平锁
+ReentrantLock lock = new ReentrantLock(true / false);
+public ReentrantLock(boolean fair) {
+    sync = fair ? new FairSync() : new NonfairSync();
+}
+```
+
+> 公平锁：讲究先来先得，线程在获取锁的时候，如果这个锁的等待队列中已经有线程在等待，那么当前线程就会进入等待队列中
+>
+> 非公平锁：不管是否有等待队列，如果可以获取锁，则立刻占有锁对象，也就是说队列的第一个排队线程在unpark()，之后还是需要竞争锁，并不是直接获得锁
+
+**lock()方法**
+
+```java
+public void lock() {
+    sync.acquire(1);
+}
+public final void acquire(int arg) {
+        if (!tryAcquire(arg) &&   //尝试获取锁失败，tryAcquire()返回false，那么!tryAcquire()就是true，还会继续执行下面的方法
+            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+            selfInterrupt();
+    }
+//非公平锁的tryAcquire()实现  --- nonfairTryAcquire()方法
+final boolean nonfairTryAcquire(int acquires) {
+            final Thread current = Thread.currentThread();   //获取当前线程
+            int c = getState();   //获取当前锁的状态
+            if (c == 0) {  //首先判断锁的状态
+                if (compareAndSetState(0, acquires)) {  //使用CAS的方式设置锁的状态  0表示锁没有被任何线程获取
+                    setExclusiveOwnerThread(current);   //如果设置成功，则设置锁的持有者为当前线程
+                    return true;
+                }
+            }
+    		//这部分就是ReentrantLock可重入的原理
+            else if (current == getExclusiveOwnerThread()) {  //判断当前想要获取锁的线程和持有锁的线程是不是同一个，如果是，也可放行
+                int nextc = c + acquires;
+                if (nextc < 0) // overflow
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+            return false;   //尝试获取锁失败，返回false
+        }
+```
+
+**addWaiter()方法**
+
+AQS中的方法，将没抢到锁的线程入队
+
+```java
+private Node addWaiter(Node mode) {
+    Node node = new Node(mode);
+
+    for (;;) {
+        //当第二次进入for循环时，由于已经做了初始化，tail指针指向的就是新创建出来的占位结点
+        Node oldTail = tail;
+        if (oldTail != null) {
+            //在这里的时候，获取锁失败的线程才真正入队
+            node.setPrevRelaxed(oldTail);  //设置结点的前向引用，如果是第一个入队的线程，指向的就是占位结点
+            if (compareAndSetTail(oldTail, node)) {  //使用CAS的方式改变尾指针
+                oldTail.next = node;  //把链表连接起来
+                return node;
+            }
+        } else {
+            //跳出这个方法之后会第二次进入for循环
+            initializeSyncQueue();
+        }
+    }
+}
+
+//初始化队列
+private final void initializeSyncQueue() {
+        Node h;
+        if (HEAD.compareAndSet(this, null, (h = new Node())))   //当第一次有线程准备入队时，会先向队列中放一个占位结点，也称为哑元结点
+            tail = h;
+    }
+```
+
+类似于这样的情况：
+
+![image-20220711195620987](JUC多线程部分.assets/image-20220711195620987.png)
+
+**acquireQueued()方法**
+
+```java
+final boolean acquireQueued(final Node node, int arg) {
+    boolean interrupted = false;
+    try {
+        for (;;) {
+            final Node p = node.predecessor();   //获取当前结点的前一个结点
+            if (p == head && tryAcquire(arg)) {  //如果是队列的第一个有效结点（不包括占位节点），可以允许线程再一次尝试获取锁
+                setHead(node);  //如果获取锁成功，就会将线程所在的那个结点转换为新的哨兵结点
+                p.next = null; // 原来的哨兵结点会被垃圾回收器回收
+                return interrupted;
+            }
+             //第一次调用这个方法的时候，返回false，但会把结点的状态置为-1，由于自旋的原因，第二次调用这个方法的时候就会返回true
+            if (shouldParkAfterFailedAcquire(p, node)) 
+                interrupted |= parkAndCheckInterrupt();  //parkAndCheckInterrupt方法就调用了LockSupport的park方法，将线程挂起，此时线程才算真正进入了AQS的等待队列中，在此之前它仍然可以尝试获取锁
+        }
+    } catch (Throwable t) {
+        cancelAcquire(node);
+        if (interrupted)
+            selfInterrupt();
+        throw t;
+    }
+}
+
+private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
+        int ws = pred.waitStatus;  //获取结点的等待状态
+        if (ws == Node.SIGNAL)  //-1表示的是这个由这个结点去调用unpark()方法去唤醒它的下一个结点
+            /*
+             * This node has already set status asking a release
+             * to signal it, so it can safely park.
+             */
+            return true;
+        if (ws > 0) {
+            /*
+             * Predecessor was cancelled. Skip over predecessors and
+             * indicate retry.
+             */
+            do {
+                node.prev = pred = pred.prev;
+            } while (pred.waitStatus > 0);
+            pred.next = node;
+        } else {
+            //将pre结点的等待状态改为Node.SIGNAL(-1)
+            pred.compareAndSetWaitStatus(ws, Node.SIGNAL);
+        }
+        return false;
+    }
+```
+
+**unlock()方法**
+
+```java
+public void unlock() {
+    sync.release(1);
+}
+
+public final boolean release(int arg) {
+        if (tryRelease(arg)) {
+            Node h = head;
+            if (h != null && h.waitStatus != 0)
+                //释放锁成功，并且队列中有其他等待的线程
+                unparkSuccessor(h);
+            return true;
+        }
+        return false;
+    }
+//ReentrantLock内部类Sync中的tryRelease()方法
+protected final boolean tryRelease(int releases) {
+            int c = getState() - releases;
+            if (Thread.currentThread() != getExclusiveOwnerThread())
+                throw new IllegalMonitorStateException();
+            boolean free = false;
+            if (c == 0) {  //表示当前线程释放锁
+                free = true;
+                setExclusiveOwnerThread(null);
+            }
+            setState(c);
+            return free;
+        }
+
+private void unparkSuccessor(Node node) {
+        //获取队列头节点的等待状态，一般都是占位结点的状态
+        int ws = node.waitStatus;
+        if (ws < 0)
+            //重新设置为0
+            node.compareAndSetWaitStatus(ws, 0);
+
+        Node s = node.next;
+        if (s == null || s.waitStatus > 0) {
+            s = null;
+            for (Node p = tail; p != node && p != null; p = p.prev)
+                if (p.waitStatus <= 0)
+                    s = p;
+        }
+    	//从这里可以看出，从队列中唤醒线程的时候，是由当前结点的前一个结点去唤醒的线程
+        if (s != null)
+            LockSupport.unpark(s.thread);
+    }
+```
