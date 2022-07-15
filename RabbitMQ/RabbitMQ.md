@@ -44,7 +44,7 @@ AMQP（Advanced Message Queuing Protocol）高级消息队列协议，兼容JMS�
 
 两者的对比：
 
-![image-20220630155418422](RabbitMQ.assets/image-20220630155418422.png)
+<img src="RabbitMQ.assets/image-20220630155418422.png" alt="image-20220630155418422" style="zoom:80%;" />
 
 
 
@@ -153,6 +153,29 @@ graph LR;
 
 RabbitMQ并不处理消息，只是接收，存储和转发消息数据
 
+
+
+#### RabbitMQ的工作流程
+
+（1）生产者与消费者首先与消息队列的消息代理建立连接，并开辟多个信道
+
+（2）生产者发送消息给消息代理中指定虚拟主机的交换机，消息由消息头和消息体组成
+
+（3）交换机接收到消息之后根据消息的路由键决定将消息发送给哪个消息队列
+
+（4）消费者通过信道监听各个消息队列，随时从消息队列中获取自己想要的消息
+
+<img src="RabbitMQ.assets/image-20220715204931865.png" alt="image-20220715204931865" style="zoom:80%;" />
+
+**几个基本概念**
+
++ Connection：网络连接，比如TCP连接
++ Binding：绑定关系，用于消息队列和交换机之间的关联，一个绑定就是基于路由键将交换机和消息队列连接起来的路由规则，通俗来理解可以将交换机看作一张路由表，交换机和队列之间的绑定可以是多对多关系
++ 信道：channel，多路复用连接中的一条独立的双向数据流通道，信道是建立在真实的TCP连接内的虚拟连接，AMQP命令都是通过信道发送出去的，不管是发布消息、订阅队列还是接收消息，这些动作都是通过信道完成的
++ 虚拟主机：表示一批交换机和消息队列，可以简单理解为就是一个mini版的RabbitMQ，拥有自己的队列，交换机，绑定和权限机制，有点类似于操作系统中的虚拟机，一个RabbitMQ可以划分多个虚拟主机，各个主机之间相互隔离，互不影响
+
+
+
 ### 2.2 四大核心概念
 
 先用一幅图表示这四大核心概念的关系
@@ -259,7 +282,7 @@ channel_b --> 消费者2
   + 信道负责数据的传输
 + 虚拟主机：指一批交换机和队列，主要目的是为了系统的隔离
 
-![image-20220630165746797](RabbitMQ.assets/image-20220630165746797.png)
+<img src="RabbitMQ.assets/image-20220630165746797.png" alt="image-20220630165746797" style="zoom:80%;" />
 
 #### 2.3.1 简单模式
 
@@ -1587,3 +1610,9 @@ public class SendMessageController {
 ![](C:\Users\86198\Desktop\JavaEE\RabbitMQ\image\发送消息.jpg)
 
 ![](C:\Users\86198\Desktop\JavaEE\RabbitMQ\image\监听结果.jpg)
+
+
+
+
+
+整合springboot之后使用可以使用RabbitTemplate发送消息
