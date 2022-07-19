@@ -777,15 +777,41 @@ Topic交换机所绑定队列的routingKey有一定的规则：
 
 ### 2.4 RabbitMQ消息应答机制
 
-消费者在处理消息时需要一定的时间，如果有一个消费者处理一个比较耗时的任务并且只处理了一部分就突然宕机了，会发生什么情况呢？
+**RabbitMQ消息确认机制**
 
-为了保证消息在发送过程中不丢失，RabbitMQ引入了消息应答机制
+在分布式环境中避免不了网络问题，生产者发送消息或者消费者接收消息都有可能产生消息丢失的问题，有些消息丢失的问题会产生严重的利润损失，为保证消息的可靠传输，rabbitMQ引入了消息确认机制
 
-消息应答就是：消费者在接收到消息并且处理该消息之后，告诉RabbitMQ消息处理完毕，可以将消息删除
+<img src="RabbitMQ.assets/image-20220718154644047.png" alt="image-20220718154644047" style="zoom:80%;" />
 
-**基本机制**
 
-生产者把消息发布到交换机，消息最终达到队列被消费者接收，而队列的绑定关系和消息的路由键决定交换机要把消息发送到哪个队列种
+
+图中的一些概念：
+
++ publisher confirmCallback：当消息队列broker正确收到生产者发送的消息时，即会调用这个确认回调，但不保证消息能够正确到达队列中
+  + 消息只要被broker接收到就会执行confirmCallback，如果是集群模式，需要所有集群中的所有broker接收到才会调用confirmCallback
+  + 被broker接收到的消息只能表示message已经到达rabbitMQ的服务器，并不能保证消息一定会被投递到目标queue里，还需要用到接下来的returnCallback
+  + 在创建rabbitmq的connectionFactory时设置PublishConfirms(true)选项开启confirmCallback
++ publisher returnCallback：当消息投递失败，交换机将消息发送给队列时出错，就会触发这个退回模式
+  + 在有些业务下，需要保证消息一定要投递到目标队列中，此时就需要用到return模式
+  + 如果消息未能投递到目标queue中，将调用returnCallback，可以记录下详细的投递数据，定时重发或者自动纠错都需要这些数据
++ consumer ack：消费者端的消息确认机制，让消息队列的broker知道，哪些消息被消费者接收到了
+  + 如果消费者正确接收了消息，消息会被删除或者做其他处理
+  + 如果消费者没有接收到消息，消息会被重新投递
+
+> consumer ack在默认情况下是自动确认，意思是只要消费者端接收到消息，即自动给服务器回复ack，消息就会被删除
+>
+> 但这种方式有一个比较大的问题，消费者端一次性接收到了很多消息，但还没来得及处理，就出现了故障，导致消息并没有处理完，那么这样就会导致大量的消息丢失
+>
+> 所以一般情况下都使用手动确认模式，即消费者端处理完成一个消息给rabbitmq回复，当rabbitmq收到这个ack确认之后，才会将消息从消息队列中删除
+>
+> rabbitmq队列中的消息有两种状态：
+>
+> + ready：消费者端没有启动连接，队列中消息的状态就是ready
+> + unack：消息发送出去了，正在被消费者处理，但没有返回处理完成的ack时的状态
+>
+> 没有收到ack的消息都是unack状态，并不会被队列删除，所以，即使consumer宕机，消息也不会丢失，会重新变为ready状态，下次有新的consumer连接进来的时候，就会把消息发送给新的consumer，发送出去的消息重新转换为unack状态
+
+<img src="RabbitMQ.assets/image-20220718173902298.png" alt="image-20220718173902298" style="zoom:80%;" />
 
 #### 2.4.1 自动应答方式
 
@@ -1089,9 +1115,13 @@ channel.exchangeDeclare("exchange", "topic", true);
 
 **什么时候会产生死信**
 
-+ 消息过期
-+ 队列达到最大长度，无法接收新的消息
-+ 消息被拒绝
++ 消息过期，即在消息在队列中未被消费的时间已经到达了TTL
++ 队列达到最大长度，先进入队列的消息会被丢弃或者扔到死信路由上
++ 一个消息被消费者拒绝了
+
+**死信交换机**
+
+死信交换机实际上是一个普通交换机，只是在某一个设置dead letter exchange的队列中有消息过期了，会自动触发消息的转发，发送到dead letter exchange中去
 
 #### 2.6.2 死信代码架构
 
@@ -1206,7 +1236,7 @@ public class Provider {
 
 延时队列，最重要的特性就体现在它的延时属性上，跟普通的队列不一样的是，普通队列中的元素总是等着希望被早点取出处理，而延时队列中的元素则是希望被在指定时间得到取出和处理，所以延时队列中的元素是都是带时间属性的，通常来说是需要被处理的消息或者任务。
 
-简单来说，延时队列就是用来存放需要在指定时间被处理的元素的队列。
+如果将过期的消息（死信）路由到死信交换机，再转发到死信队列中，然后再由需要的消费者去监听这个死信队列，其实就实现了一个**延时队列**
 
 **延迟队列的应用场景**
 
@@ -1218,11 +1248,20 @@ public class Provider {
 
 **RabbitMQ中的TTL**
 
-`TTL`是RabbitMQ中一个消息或者队列的属性，表明`一条消息或者该队列中的所有消息的最大存活时间`，单位是毫秒。换句话说，如果一条消息设置了TTL属性或者进入了设置TTL属性的队列，那么这条消息如果在TTL设置的时间内没有被消费，则会成为“死信”
+`TTL`是RabbitMQ中一个消息或者队列的属性，简单来说就是消息的存活时间，单位是毫秒。RabbitMQ可以对队列和消息分别设置TTL
 
-如果同时配置了队列的TTL和消息的TTL，那么较小的那个值将会被使用。
++ 对队列设置就是队列中所有消息的TTL都是这个值，也可以对每个单独的消息做单独的设置，超过了这个时间，就认为消息已经“死了”，称为死信
++ 如果队列设置了TTL，消息也设置了TTL，那么RabbitMQ会选取一个较小的值作为某一个消息的TTL
 
+**延时队列的两种实现方式**
 
+（1）给正常的消息队列配置一些基础设置，比如x-message-ttl队列中消息的TTL，这是比较推荐的方式
+
+<img src="RabbitMQ.assets/image-20220719153225979.png" alt="image-20220719153225979" style="zoom:80%;" />
+
+（2）在生产者发送消息的时候，给每条消息单独设置ttl，由于RabbitMQ使用一种懒处理的方式，这样的设置会有比较大的时间误差
+
+<img src="RabbitMQ.assets/image-20220719153402335.png" alt="image-20220719153402335" style="zoom:80%;" />
 
 ## 三、SpringBoot整合RabbitMQ
 
@@ -1615,4 +1654,139 @@ public class SendMessageController {
 
 
 
-整合springboot之后使用可以使用RabbitTemplate发送消息
+### 3.4 springboot整合RabbitMQ总结
+
+**AmqpAdmin**
+
+AmqpAdmin是springboot提供的一个操作rabbitmq的组件
+
++ 可以创建交换机，队列，绑定关系等
++ 可以发送消息
+
+```java
+@Autowired
+private AmqpAdmin amqpAdmin;
+
+@Test
+void createExchange() {
+    //创建一个直接交换机
+    //参数：name, durable(是否持久化，一般为true), autoDelete(是否自动删除，一般为false), Map<String, Object>(携带参数，可以没有)
+    DirectExchange directExchange = new DirectExchange("hello-java-exchange", true, false, null);
+    amqpAdmin.declareExchange(directExchange);
+    log.info("Exchange[{}]创建成功", directExchange.getName());
+}
+
+@Test
+void createQueue() {
+    //创建一个队列
+    //参数：name, durable(是否持久化), exclusive(是否排他，如果是，只有当前连接能够获取队列中的消息，一般为false), autoDelete(是否自动删除), argument(携带参数)
+    Queue queue = new Queue("hello-java-queue", true, false, true, null);
+    amqpAdmin.declareQueue(queue);
+    log.info("Queue[{}]创建成功", queue.getName());
+}
+
+@Test
+void createBinding() {
+    //创建队列与交换机的绑定关系
+    //参数：destination(目的地)
+    //destinationType(目的地类型)，可以是队列和交换机
+    //exchange(交换机名称)
+    //routingKey(路由键)
+    //argument(参数)
+    Binding binding = new Binding("hello-java-queue", Binding.DestinationType.QUEUE,
+            "hello-java-exchange", "hello.java", null);  //将exchange交换机与指定的目的地进行绑定，使用routingKey作为路由键
+    amqpAdmin.declareBinding(binding);
+    log.info("Binding[{}]创建成功", binding.getRoutingKey());
+}
+```
+
+**RabbitTemplate**
+
+用于发送消息，一般需要配置一个消息转换器，默认采用Java序列化机制进行消息转换，可以在配置类中配置json的消息转换器
+
+如果用于发送对象，对象所属的类必须实现Serializable接口
+
+```java
+@Test
+    void sendMessage() {
+        //发送消息
+        //exchange: 交换机名称
+        //routingKey: 消息携带的路由键
+        //object: 消息内容，可以是任意对象
+//        rabbitTemplate.convertAndSend("hello-java-exchange", "hello.java", "hello world!");
+//        log.info("消息{}发送成功", "hello world!");     //发送字符串
+
+        Student student = new Student();  //如果要发送对象，对象需要实现Serializable接口
+        student.setName("Lucy");
+        student.setNumber("123456");
+        student.setGrade("86.5");
+        rabbitTemplate.convertAndSend("hello-java-exchange", "hello.java", student);
+        log.info("消息{}发送成功", student);   //发送任意对象
+    }
+```
+
+**@RabbitListener和@RabbitHandler**
+
+这两个注解通常用来接收消息
+
++ `@RabbitListener`注解可以标在类和方法上
+  + `queues`：表示方法或者类监听的队列，可以监听多个队列
++ `@RabbitHandler`只能标在方法上
+
+```java
+/*
+* 使用@RabbitListener注解接收消息
+* @RabbitListener能标在类上和方法上
+* 收到的消息类型为org.springframework.amqp.core.Message
+* 可以只写这个类型，直接接收消息
+* 如果确定消息的类型，也可以直接在方法的参数中添加，接收到的消息会自动转换为指定的类型
+* 还能够写一个参数，Channel(amqp核心包下)，即连接建立后的通道
+*
+* 消息队列中的队列可以有多个服务监听，但最终接收到消息的服务只有一个
+* 场景：微服务下，某一个服务肯定会启动多个，比如商城项目中的订单服务
+* 现在，订单服务被部署在了三台服务器上，这三台服务器同时监听rabbitmq
+* 结果：(1). 消息会分配到三个订单服务中去，但每一个消息只会被一个服务接收
+*      (2). 并且每一个服务，只有把刚刚接收到的消息处理完之后，才能够接收下一个消息
+*
+*
+* 接收消息还有一个注解：@RabbitHandler
+* 这个注解只能标在方法上，可以配合@RabbitListener
+* 使得一个类下的不同方法接收不同消息类型的消息
+* 比如：
+* @RabbitListener(queues = {"hello-java-queue"})   //整个类下的方法监听hello-java-queue的队列中的消息
+* public class OrderService {
+*
+*       @RabbitHandler   //这个方法接收消息体类型为OrderEntity的消息
+*       public void receiveMessage1(OrderEntity orderEntity) {
+*           ....
+*       }
+*
+*       @RabbitHandler   //这个方法接收消息体类型为OrderRefund的消息
+*       public void receiveMessage2(OrderRefund orderFund) {
+*           ...
+*       }
+*
+* }
+* */
+@RabbitListener(queues = {"hello-java-queue"})    //监听队列接收消息
+//@RabbitHandler
+public void receive(Object object, Student student, Channel channel) {
+    //接收到的消息是amqp核心包下的Message
+    Message message = (Message) object;
+    byte[] body = message.getBody();   //消息体，即消息的内容
+    MessageProperties messageProperties = message.getMessageProperties();  //消息的属性，即消息头
+    log.info("接收到消息的内容: {}", object);
+    log.info("消息的内容: {}", student);
+    
+    log.info("处理消息...");
+    
+    try {
+        long deliveryTag = messageProperties.getDeliveryTag();  //确认消息的分配标志 
+        //消息处理完成之后需要向消息队列发送确认
+        channel.basicAck(deliveryTag, false);
+        log.info("消息已处理完成...");
+    } catch (Exception e) {
+        
+    }
+}
+```
