@@ -483,3 +483,17 @@ private void unparkSuccessor(Node node) {
             LockSupport.unpark(s.thread);
     }
 ```
+
+### 线程池
+
+Java中的线程池是通过Executor框架实现的，该框架中用到了Executor，Executors，ExecutorService，ThreadPoolExecutor这几个类
+
+<img src="JUC多线程部分.assets/image-20220721171058761.png" alt="image-20220721171058761" style="zoom:80%;" />
+
+其中最重要的就是ThreadPoolExecutor
+
+**三种常用的线程池**
+
++ `Executors.newFixedThreadPool(int nThread)`：固定线程数的线程池，核心线程数 = 最大线程数，适合执行长期任务
++ `Executors.newCachedThreadPool`：线程池中有多个线程，没有核心线程，全是救急线程，并且有无穷多个救急线程，适合执行短时间任务
++ `Executors.newSingleThreadExecutor`：线程池中只有一个线程，核心线程数 = 最大线程数 = 1，适合任务串行执行的场景
