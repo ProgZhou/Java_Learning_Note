@@ -484,6 +484,49 @@ private void unparkSuccessor(Node node) {
     }
 ```
 
+
+
+### 阻塞队列
+
+阻塞队列首先是一个队列：
+
+<img src="JUC多线程部分.assets/image-20220722190827710.png" alt="image-20220722190827710" style="zoom:80%;" />
+
+阻塞队列的两个特点：
+
++ 当阻塞队列是**空**的时候，从队列中**获取元素**的操作将会被阻塞
++ 当阻塞队列是**满**的时候，往队列中**添加元素**的操作会被阻塞
+
+**为什么需要阻塞队列**
+
+好处就是不需要去关心什么时候需要阻塞线程，什么时候需要唤醒线程，因为这一切阻塞队列都实现了
+
+**BlockingQueue的继承关系及其主要实现类**
+
+<img src="JUC多线程部分.assets/image-20220722191832947.png" alt="image-20220722191832947" style="zoom:80%;" />
+
+
+
++ `ArrayBlockingQueue`：有数组结构组成的有界阻塞队列
++ `LinkedBlockingQueue`：由链表结构组成的有界阻塞队列（虽然有界，但最多可以放Integer.MAX_VALUE，相当于无界）
++ `PriorityBlockingQueue`：支持优先级排序的无界阻塞队列
++ `SynchronousQueue`：不存储元素的阻塞队列，即单个元素的队列，放入队列中就必须立刻被消费
+
+接口的常用方法：
+
+<img src="JUC多线程部分.assets/image-20220722192611199.png" alt="image-20220722192611199" style="zoom:80%;" />
+
+比较特殊的是第三组`put()和take()`：
+
++ 当阻塞队列满时，生产者线程继续往队列里put元素，队列会一直阻塞生产者线程
++ 当阻塞队列空时，消费者线程试图从队列里take元素，队列会一直阻塞消费者线程
+
+`ArrayBlockingQueue`和`LinkedBlockingQueue`基本上与`ArrayList`和`LinkedList`操作差不多
+
+一个不同的是`SynchronousQueue`，这个队列中只会存放一个元素，消费者不消费，生产者不生产
+
+
+
 ### 线程池
 
 Java中的线程池是通过Executor框架实现的，该框架中用到了Executor，Executors，ExecutorService，ThreadPoolExecutor这几个类
@@ -496,4 +539,43 @@ Java中的线程池是通过Executor框架实现的，该框架中用到了Execu
 
 + `Executors.newFixedThreadPool(int nThread)`：固定线程数的线程池，核心线程数 = 最大线程数，适合执行长期任务
 + `Executors.newCachedThreadPool`：线程池中有多个线程，没有核心线程，全是救急线程，并且有无穷多个救急线程，适合执行短时间任务
-+ `Executors.newSingleThreadExecutor`：线程池中只有一个线程，核心线程数 = 最大线程数 = 1，适合任务串行执行的场景
++ `Executors.newSingleThreadPool`：线程池中只有一个线程，核心线程数 = 最大线程数 = 1，适合任务串行执行的场景
+
+**线程池的七个参数**
+
+```java
+public ThreadPoolExecutor(int corePoolSize,   //核心线程数
+                          int maximumPoolSize,   //最大线程数
+                          long keepAliveTime,   //救急线程存活时间
+                          TimeUnit unit,    //时间单位
+                          BlockingQueue<Runnable> workQueue,    //任务队列 / 阻塞队列
+                          ThreadFactory threadFactory,    //线程工厂
+                          RejectedExecutionHandler handler) {}    //拒绝策略
+```
+
+**线程池的工作原理**
+
+《JUC并发编程》6.1.2
+
+**Tips**
+
+虽然在JDK中提供了三种常用线程池，但由于本身的限制，生产上几乎不用这三种使用`Executors`创建的线程池（加上`ScheduleThreadPool`四个都不用）
+
+原因：
+
++ `FixedThreadPool`和`SingleThreadPool`使用LinkedBlockingQueue，可能会堆积大量请求导致OOM
++ `CachedThreadPool`和`ScheduleThreadPool`允许创建的线程数为Integer.MAX_VALUE，创建大量线程也可能导致OOM
+
+**如何确定线程池的线程数**
+
+一般有两种方式来计算线程数量：
+
++ CPU密集型运算：通常采用 `cpu 核数 + 1` 能够实现最优的 CPU 利用率，+1 是保证当线程由于页缺失故障（操作系统）或其它原因
+  导致暂停时，额外的这个线程就能顶上去，保证 CPU 时钟周期不被浪费
+
++ IO密集型运算：CPU并不总是处于繁忙的情况下，例如，执行IO操作或者进行远程RPC调用时，CPU就会闲下来了
+
+  经验公式：`线程数 = 核数 * 期望 CPU 利用率 * 总时间(CPU计算时间+等待时间) / CPU 计算时间`
+
+  例如 4 核 CPU 计算时间是 50% ，其它等待时间是 50%，期望 cpu 被 100% 利用，套用公式 `4 * 100% * 100% / 50% = 8`，即需要8个线程
+
