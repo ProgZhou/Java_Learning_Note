@@ -540,109 +540,78 @@ scope即为bean的作用域，常见的有singleton和prototype
 
 ### 总结
 
-在没有BeanPostProcessor之前：
+基本的生命周期：
 
-```java
-@Component
-@Slf4j
-public class LifeCycleBean {
-    /*
-    * 如果没有配置bean的后处理器，那么执行顺序会是：
-    * 1. 构造方法
-    * 2. 依赖注入
-    * 3. 初始化方法
-    * 4. 在spring容器关闭时，调用销毁方法
-    * */
-
-    //构造方法
-    public LifeCycleBean() {
-        log.debug("构造方法...");
-    }
-
-    //依赖注入
-    @Autowired
-    public void autowire(@Value("${JAVA_HOME}") String path) {
-        log.debug("依赖注入: {}", path);
-    }
-
-    //初始化方法
-    @PostConstruct
-    public void init() {
-        log.debug("初始化方法...");
-    }
-
-    //销毁方法
-    @PreDestroy
-    public void destroy() {
-        log.debug("销毁方法...");
-    }
-
-}
+```mermaid
+graph LR;
+构造实例化 --> 依赖注入
+依赖注入 --> 初始化方法
+初始化方法 --> bean的使用
+bean的使用 --> 销毁方法
 ```
 
-BeanPostProcessor的增强方法
+可以使用`BeanPostProcessor`bean后处理器对bean生命周期的各个阶段进行一定的增强
 
 ```java
 @Component
 @Slf4j
 public class MyBeanPostProcessor implements InstantiationAwareBeanPostProcessor, DestructionAwareBeanPostProcessor {
-
-    //在bean销毁之前执行
     @Override
     public void postProcessBeforeDestruction(Object bean, String beanName) throws BeansException {
         if(beanName.equals("lifeCycleBean")) {
-            log.debug("<<<<<<<<销毁之前执行，就比如@PreDestroy");
+            log.info("<<<<<<  在销毁方法执行之前执行");
         }
     }
 
-    //在bean的构造方法执行之前执行
     @Override
     public Object postProcessBeforeInstantiation(Class<?> beanClass, String beanName) throws BeansException {
-        if (beanName.equals("lifeCycleBean")) {
-            log.debug("<<<<<<<<在实例化之前执行，这里返回的对象会替换掉容器中原本的bean");
-        }
+        if (beanName.equals("lifeCycleBean"))
+            log.info("<<<<<< 实例化（构造方法）之前执行, 这里返回的对象会替换掉原本的 bean");
         return null;
     }
 
-    //在bean的构造方法执行之后执行这个方法，如果返回true，则会继续执行后面的依赖注入方法；如果返回false，则不会执行之后的依赖注入方法
     @Override
     public boolean postProcessAfterInstantiation(Object bean, String beanName) throws BeansException {
         if (beanName.equals("lifeCycleBean")) {
-            log.debug("<<<<<<<<在实例化之后执行，如果方法返回false会跳过依赖注入的阶段");
+            log.info("<<<<<< 实例化（构造方法）之后执行, 这里如果返回 false 会跳过依赖注入阶段");
+//            return false;
         }
         return true;
     }
 
-    //在依赖注入之前执行，解析一些依赖注入的注解
     @Override
     public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) throws BeansException {
-        if (beanName.equals("lifeCycleBean")) {
-            log.debug("<<<<<<<<依赖注入阶段执行，比如@Autowire，@Value，@Resource");
-        }
+        if (beanName.equals("lifeCycleBean"))
+            log.info("<<<<<< 依赖注入阶段执行, 如 @Autowired、@Value、@Resource");
         return pvs;
     }
 
-    //在初始化执行之前执行
     @Override
     public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
-        if (beanName.equals("lifeCycleBean")) {
-            log.debug("<<<<<<<<在初始化方法之前执行，这里返回的对象会替换掉容器中原本的bean");
-        }
+        if (beanName.equals("lifeCycleBean"))
+            log.info("<<<<<< 初始化方法之前执行, 这里返回的对象会替换掉原本的 bean, 如 @PostConstruct、@ConfigurationProperties");
         return bean;
     }
 
-    //在初始化执行之后执行
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
-        if (beanName.equals("lifeCycleBean")) {
-            log.debug("<<<<<<<<在初始化方法执行之后执行，这里返回的对象会替换掉容器中原本的bean");
-        }
+        if (beanName.equals("lifeCycleBean"))
+            log.info("<<<<<< 初始化方法之后执行, 这里返回的对象会替换掉原本的 bean, 如代理增强");
         return bean;
     }
 }
+输出结果：
+2022-07-25 15:30:09.824  INFO 6888 --- [  restartedMain] c.j.s.d.processor.MyBeanPostProcessor    : <<<<<< 实例化（构造方法）之前执行, 这里返回的对象会替换掉原本的 bean
+2022-07-25 15:30:09.826  INFO 6888 --- [  restartedMain] com.java.spring.demo.life.LifeCycleBean  : bean构造方法
+2022-07-25 15:30:09.829  INFO 6888 --- [  restartedMain] c.j.s.d.processor.MyBeanPostProcessor    : <<<<<< 实例化（构造方法）之后执行, 这里如果返回 false 会跳过依赖注入阶段
+2022-07-25 15:30:09.829  INFO 6888 --- [  restartedMain] c.j.s.d.processor.MyBeanPostProcessor    : <<<<<< 依赖注入阶段执行, 如 @Autowired、@Value、@Resource
+2022-07-25 15:30:09.830  INFO 6888 --- [  restartedMain] com.java.spring.demo.life.LifeCycleBean  : 依赖注入: C:\Program Files\Java\jdk1.8.0_74
+2022-07-25 15:30:09.831  INFO 6888 --- [  restartedMain] c.j.s.d.processor.MyBeanPostProcessor    : <<<<<< 初始化方法之前执行, 这里返回的对象会替换掉原本的 bean, 如 @PostConstruct、@ConfigurationProperties
+2022-07-25 15:30:09.832  INFO 6888 --- [  restartedMain] com.java.spring.demo.life.LifeCycleBean  : 初始化方法
+2022-07-25 15:30:09.832  INFO 6888 --- [  restartedMain] c.j.s.d.processor.MyBeanPostProcessor    : <<<<<< 初始化方法之后执行, 这里返回的对象会替换掉原本的 bean, 如代理增强
+2022-07-25 15:30:10.938  INFO 6888 --- [  restartedMain] c.j.s.d.processor.MyBeanPostProcessor    : <<<<<<  在销毁方法执行之前执行
+2022-07-25 15:30:10.939  INFO 6888 --- [  restartedMain] com.java.spring.demo.life.LifeCycleBean  : 销毁方法
 ```
-
-
 
 
 
@@ -1057,3 +1026,311 @@ static class MyBeanFactory {
 
 ## 附录4 常见的Bean的后处理器
 
+Bean后处理器的主要作用就是为bean生命周期的各个阶段提供一些扩展
+
+**AutowiredAnnotationBeanPostProcessor**
+
+用于解析@Autowired、@Value注解的bean后处理器
+
+```java
+public class BeanPostProcessorTest {
+    public static void main(String[] args) {
+        //一个比较干净的容器，没有添加一些特定的Bean后处理器
+        GenericApplicationContext context = new GenericApplicationContext();
+
+        //将三个Bean注入到容器中
+        context.registerBean("bean1", Bean1.class);
+        context.registerBean("bean2", Bean2.class);
+        context.registerBean("bean3", Bean3.class);
+
+        context.getDefaultListableBeanFactory().
+                setAutowireCandidateResolver(new ContextAnnotationAutowireCandidateResolver());  //暂时不管，是解析字符串用的
+
+        //添加bean后处理器
+        context.registerBean(AutowiredAnnotationBeanPostProcessor.class);  //解析@Autowired @Value注解的后处理器
+
+
+        //初始化容器
+        context.refresh();   //执行beanFactory后处理器，添加bean后处理器，初始化所有单例
+
+        context.close();
+
+    }
+}
+输出：在没有添加那个后处理器时，只会输出spring内部自己的日志信息
+15:53:03.311 [main] INFO com.java.another.Bean1 - @Autowired 生效: com.java.another.Bean2@a1cdc6d
+15:53:03.320 [main] DEBUG org.springframework.core.env.PropertySourcesPropertyResolver - Found key 'JAVA_HOME' in PropertySource 'systemEnvironment' with value of type String
+15:53:03.334 [main] INFO com.java.another.Bean1 - @Value 生效: C:\Program Files\Java\jdk1.8.0_74
+```
+
+**CommonAnnotationBeanPostProcessor**
+
+用于解析@Resource、@PostConstruct、@PreDestroy注解
+
+```java
+//添加bean后处理器
+context.registerBean(AutowiredAnnotationBeanPostProcessor.class);  //解析@Autowired @Value注解的后处理器
+
+context.registerBean(CommonAnnotationBeanPostProcessor.class);
+
+输出：
+15:58:02.089 [main] INFO com.java.another.Bean1 - @Resource 生效: com.java.another.Bean3@2118cddf   
+15:58:02.106 [main] DEBUG org.springframework.core.env.PropertySourcesPropertyResolver - Found key 'JAVA_HOME' in PropertySource 'systemEnvironment' with value of type String
+15:58:02.116 [main] INFO com.java.another.Bean1 - @Value 生效: C:\Program Files\Java\jdk1.8.0_74
+15:58:02.116 [main] DEBUG org.springframework.beans.factory.support.DefaultListableBeanFactory - Creating shared instance of singleton bean 'bean2'
+15:58:02.117 [main] INFO com.java.another.Bean1 - @Autowired 生效: com.java.another.Bean2@68c72235
+15:58:02.117 [main] INFO com.java.another.Bean1 - @PostConstruct 生效
+15:58:02.129 [main] DEBUG org.springframework.context.support.GenericApplicationContext - Closing org.springframework.context.support.GenericApplicationContext@5204062d, started on Mon Jul 25 15:58:01 CST 2022
+15:58:02.130 [main] INFO com.java.another.Bean1 - @PreDestroy 生效
+```
+
+**ConfigurationPropertiesBindingPostProcessor**
+
+Springboot的bean后处理器，用于将类和配置文件进行绑定，主要的作用就是解析@ConfigurationProperties注解
+
+```java
+//添加bean后处理器
+context.registerBean(AutowiredAnnotationBeanPostProcessor.class);  //解析@Autowired @Value注解的后处理器
+
+context.registerBean(CommonAnnotationBeanPostProcessor.class);   //解析@Resource、@PostConstruct、@PreDestroy注解
+
+//Springboot的bean后处理器，用于将类与配置文件绑定@ConfigurationProperties注解
+ConfigurationPropertiesBindingPostProcessor.register(context.getDefaultListableBeanFactory());
+
+System.out.println(context.getBean("bean4"));
+输出：
+16:40:21.376 [main] DEBUG org.springframework.beans.factory.support.DefaultListableBeanFactory - Creating shared instance of singleton bean 'bean4'
+Bean4{home='C:\Program Files\AdoptOpenJDK\jdk-11.0.10.9-hotspot', version='11.0.10'}
+```
+
+## 附录5 常见的Bean工厂后处理器
+
+
+
+## 附录6 Spring中的Scope
+
+即Bean的作用域，常见的有5中：
+
+* singleton，容器启动时创建（未设置延迟），容器关闭时销毁
+* prototype，每次使用时创建，不会自动销毁，需要调用 DefaultListableBeanFactory.destroyBean(bean) 销毁
+* request，每次请求用到此 bean 时创建，请求结束时销毁
+* session，每个会话用到此 bean 时创建，会话结束时销毁
+* application，web 容器用到此 bean 时创建，容器停止时销毁
+
+**Scope为Singleton注入其他scope bean失效的问题**
+
+```java
+public static void main(String[] args) {
+    AnnotationConfigApplicationContext context =
+            new AnnotationConfigApplicationContext("com.java.another.demo2");
+
+    E e = context.getBean(E.class);
+    log.info("{}", e.getF1());
+    log.info("{}", e.getF1());
+    log.info("{}", e.getF1());
+    log.info("{}", e.getF1());
+    context.close();
+
+}
+
+@Component  //不加@Scope注解默认就是单例的
+public class E {
+
+    @Autowired
+    private F1 f1;
+
+    public F1 getF1() {
+        return f1;
+    }
+}
+
+@Scope("prototype")
+@Component
+public class F1 {}
+
+输出：
+17:01:45.912 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@2c35e847
+17:01:45.914 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@2c35e847
+17:01:45.915 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@2c35e847
+17:01:45.915 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@2c35e847
+```
+
+原因：对单例对象来说依赖注入仅仅发生了一次，E使用的是第一次依赖注入的F1，所以得到的F1对象都是相同的
+
+解决方法：在依赖注入的注解上加上@Lazy注解，@Lazy注解在依赖注入的时候使用的是代理对象，虽然E中的代理F1是同一个，但每次使用代理对象的任意方法时，代理对象都会新建一个F1对象
+
+```java
+@Component
+public class E {
+    @Lazy   //解决scope失效的问题
+    @Autowired
+    private F1 f1;
+
+    public F1 getF1() {
+        return f1;
+    }
+}
+
+输出：第一行是注入到E中的F1的代理对象
+17:10:38.602 [main] INFO com.java.another.demo2.ScopeTest - class com.java.another.demo2.F1$$EnhancerBySpringCGLIB$$cfa5578d
+17:10:38.603 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@6cc4cdb9
+17:10:38.627 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@7f2cfe3f
+17:10:38.627 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@5038d0b5
+17:10:38.628 [main] INFO com.java.another.demo2.ScopeTest - com.java.another.demo2.F1@2ad48653
+```
+
+还有一种解决办法就是在@Scope注解中添加一个属性proxyMode，代理模式，原理还是一样的，仍然是创建代理对象
+
+```java
+@Scope(value = "prototype", proxyMode = ScopedProxyMode.TARGET_CLASS)
+public class F1 {
+}
+```
+
+上面两种方法总体来说给目标对象注入代理对象，再由代理对象去创建一个个多例对象，下面两种方法不需要采用代理的方式，直接由工厂去生成：
+
+```java
+@Component
+public class E {
+
+    @Lazy   //解决scope失效的问题
+    @Autowired
+    private F1 f1;
+
+    @Autowired
+    private ObjectFactory<F2> f2;    //生成F2多例对象的工厂
+    
+    @Autowired
+    private ApplicationContext context;  //也可以直接注入spring容器
+
+    public F1 getF1() {
+        return f1;
+    }
+
+    public F2 getF2() {
+        return f2.getObject();
+    }
+}
+```
+
+## 附录7 Spring中的AOP
+
+### 原生AspectJ
+
+```java
+@Service
+@Slf4j
+public class MyService {
+
+    public void foo() {
+        log.info("待增强的方法 -- MyService.foo()");
+    }
+
+}
+@Aspect  //原生AspectJ的注解
+@Slf4j
+public class MyAspect {
+
+    @Before("execution(* com.java.spring.demo.service.MyService.foo())")
+    public void before() {
+        log.info("before()...");
+    }
+
+}
+```
+
+原生的AspectJ并不是由代理对象去增强MyService中的foo方法的，而是直接由AspectJ编译器去改写了MyService类，在foo方法执行之前增加了一个方法调用，但这种方法使用的比较少，但使用这样的好处就是，能够突破一些代理的限制，比如：代理通常是通过重写方法实现的，但子类不能重写父类的静态方法，静态方法就不能通过代理对象去做增强，但AspectJ编译器可以，因为它是直接对方法进行改写，而不是重写
+
+### jdk动态代理
+
+jdk动态代理的使用：
+
+```java
+public class ProxyTest {
+    public static void main(String[] args) {
+        //演示jdk代理，只能针对接口代理
+        ClassLoader classLoader = ProxyTest.class.getClassLoader();   //类加载器，用于加载在运行期间动态生成的字节码
+        Class[] classes = {Foo.class};   //实现接口的数组
+        //间接调用被代理类中的方法
+        Target target = new Target();
+        InvocationHandler handler = (proxy, method, args1) -> {
+            log.info("before()...");
+            Object invoke = method.invoke(target, args1);
+            log.info("after()...");
+            return invoke;
+        };
+
+        Foo proxy = (Foo) Proxy.newProxyInstance(classLoader, classes, handler);
+        proxy.foo();
+    }
+
+    interface Foo {
+        void foo();
+    }
+    //被代理对象
+    static class Target implements Foo {
+
+        @Override
+        public void foo() {
+            log.info("目标方法 -- foo()");
+        }
+    }
+}
+```
+
+jdk动态代理的特点：
+
++ jdk的代理对象与目标对象之间是兄弟关系（指都实现了同一个接口）
++ 代理对象与目标对象之间不能进行强制类型转换
++ 目标类可以使用final修饰，因为代理对象和目标对象之间不是继承关系
+
+### cglib代理
+
+cglib动态代理的使用：
+
+```java
+public class CglibProxyTest {
+
+    public static void main(String[] args) {
+        //cglib动态代理，通过类的继承关系进行代理
+        Target target = new Target();
+
+        Class<Target> father = Target.class;   //代理对象的父类型
+        MethodInterceptor interceptor = new MethodInterceptor() {
+            /**
+             *
+             * @param o  代理类自己
+             * @param method  代理类中增强的方法
+             * @param objects 方法执行的参数
+             * @param methodProxy  方法对象
+             * @return 方法执行结果
+             * @throws Throwable
+             */
+            @Override
+            public Object intercept(Object o, Method method, Object[] objects, MethodProxy methodProxy) throws Throwable {
+                log.info("before()...");
+                Object result = method.invoke(target, objects);
+                //Object result =  methodProxy.invoke(target, objects);   //spring用的就是这种
+                log.info("after()...");
+
+                return result;
+            }
+        };
+        Target proxy = (Target) Enhancer.create(father, interceptor);
+        proxy.foo();
+    }
+
+    static class Target {
+        public void foo() {
+            log.info("目标方法 --- foo()");
+        }
+    }
+}
+```
+
+cglib动态代理的特点：
+
++ 代理类和目标类是父子关系
++ 目标类就不能加final关键字，因为final类不能创建子类
++ 目标类中的方法也不能用final修饰，因为代理类是通过方法重写的方式增强方法的
++ 在MethodInterceptor中（作用和InvocationHandler类似）提供了一个MethodProxy，可以不通过反射去调用目标方法
