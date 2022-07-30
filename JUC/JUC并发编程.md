@@ -5205,7 +5205,7 @@ for (int i = 0; i < 5; i++) {
 
 #### 6.1.2 ThreadPoolExecutor
 
-ThreadPoolExecutor是`java.util.concurrent`包下提供的一个线程池的实现类，它的集成体系：
+ThreadPoolExecutor是`java.util.concurrent`包下提供的一个线程池的实现类，它的继承体系：
 
 ![ThreadpoolExecutor](C:\Users\86198\Desktop\JavaEE\JUC\image\ThreadpoolExecutor.jpg)
 

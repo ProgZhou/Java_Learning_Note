@@ -811,7 +811,20 @@ Topic交换机所绑定队列的routingKey有一定的规则：
 
 ### 2.4 RabbitMQ消息应答机制
 
+**RabbitMQ可能存在的问题**
+
++ 消息可靠性问题：如何确保发送的消息至少被消费一次
++ 延迟消息的问题：如何实现消息的延迟投递
++ 消息堆积问题：如何解决数百万消息堆积，无法及时处理消息的问题
++ 如何避免单点的MQ故障而导致的不可用问题
+
+
+
 **RabbitMQ消息确认机制**
+
+消息丢失：
+
+<img src="RabbitMQ.assets/image-20220727200739967.png" alt="image-20220727200739967" style="zoom:80%;" />
 
 在分布式环境中避免不了网络问题，生产者发送消息或者消费者接收消息都有可能产生消息丢失的问题，有些消息丢失的问题会产生严重的利润损失，为保证消息的可靠传输，rabbitMQ引入了消息确认机制
 
@@ -821,14 +834,14 @@ Topic交换机所绑定队列的routingKey有一定的规则：
 
 图中的一些概念：
 
-+ publisher confirmCallback：当消息队列broker正确收到生产者发送的消息时，即会调用这个确认回调，但不保证消息能够正确到达队列中
++ `publisher confirmCallback`：当消息队列broker正确收到生产者发送的消息时，即会调用这个确认回调，但不保证消息能够正确到达队列中
   + 消息只要被broker接收到就会执行confirmCallback，如果是集群模式，需要所有集群中的所有broker接收到才会调用confirmCallback
   + 被broker接收到的消息只能表示message已经到达rabbitMQ的服务器，并不能保证消息一定会被投递到目标queue里，还需要用到接下来的returnCallback
   + 在创建rabbitmq的connectionFactory时设置PublishConfirms(true)选项开启confirmCallback
-+ publisher returnCallback：当消息投递失败，交换机将消息发送给队列时出错，就会触发这个退回模式
++ `publisher returnCallback`：当消息投递失败，交换机将消息发送给队列时出错，就会触发这个退回模式
   + 在有些业务下，需要保证消息一定要投递到目标队列中，此时就需要用到return模式
   + 如果消息未能投递到目标queue中，将调用returnCallback，可以记录下详细的投递数据，定时重发或者自动纠错都需要这些数据
-+ consumer ack：消费者端的消息确认机制，让消息队列的broker知道，哪些消息被消费者接收到了
++ `consumer ack`：消费者端的消息确认机制，让消息队列的broker知道，哪些消息被消费者接收到了
   + 如果消费者正确接收了消息，消息会被删除或者做其他处理
   + 如果消费者没有接收到消息，消息会被重新投递
 
