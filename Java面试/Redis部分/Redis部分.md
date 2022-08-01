@@ -402,7 +402,14 @@ if(lock) {
 
 ![image-20220629173443333](Redis部分.assets/image-20220629173443333.png)
 
-
+> 使用setnx命令 + lua脚本实现分布式锁的一些细节：
+>
+> + 这个锁是不可重入的，同一个线程无法多次获取同一把分布式锁
+> + 不可重试，为获取锁的线程只尝试一次就返回false，没有重试机制
+> + 超时释放，锁的超时释放虽然可以避免死锁的问题，但如果业务逻辑执行时间太长，会导致锁的过期
+> + 主从一致，如果Redis是集群模式，主从同步存在延迟，当主机宕机时，从机没有同步主机中锁数据，也会出现问题
+>
+> 以上问题发生的概率都比较小，或者说业务没有这个需求，在大部分情况下，使用redis自带的setnx + lua脚本已经能够适用于大部分的场景
 
 
 
@@ -656,6 +663,54 @@ public Redisson redisson() {
 }
 ```
 
+### 分布式锁工具
+
+Redisson是在redis的基础上实现的Java驻内存数据网络，不仅提供了一些列的分布式的Java常用对象，还提供了许多分布式服务，其中就包含了各种分布式锁的实现
+
+<img src="Redis部分.assets/image-20220801100202050.png" alt="image-20220801100202050" style="zoom:80%;" />
+
+
+
+Redisson的使用：
+
+（1）在需要使用的项目中引入依赖：
+
+```xml
+<dependency>
+    <groupId>org.redisson</groupId>
+    <artifactId>redisson</artifactId>
+    <version>3.13.6</version>
+</dependency>
+```
+
+（2）配置RedissonClient
+
+```java
+@Configuration
+public class RedisConfig {
+    @Bean
+    public RedissonClient redissonClient() {
+        Config config = new Config();
+        config.useSingleServer().setAddress("redis://localhost:6379").setPassword("123456");  //redis的地址和密码（如果有密码的话）
+        return Redisson.create(config);
+    }
+}
+```
+
+（3）使用：优点类似于Java中的ReentrantLock
+
+```java
+//获取Redis分布式锁
+RLock lock = redissonClient.getLock("lock:order:" + userId);
+//尝试获取锁
+boolean isLock = lock.tryLock();
+try {
+    //业务逻辑
+} finally {
+    lock.unlock();  //释放锁
+}
+```
+
 ## 三、Redis的应用场景
 
 ### 热点数据缓存
@@ -689,9 +744,7 @@ redis中有一条命令incry / incr可以实现原子性的递增，可以做相
 
 比如点赞排行榜，做一个SortedSet, 然后以用户的openid作为上面的username, 以用户的点赞数作为上面的score, 然后针对每个用户做一个hash, 通过zrangebyscore就可以按照点赞数获取排行榜，然后再根据username获取用户的hash信息，这个当时在实际运用中性能体验也蛮不错的。
 
-
-
-## 附录 Redis作为缓存
+## 四、Redis作为缓存
 
 为了提升系统的性能，一般会将一些数据放到缓存中，加速访问，而数据库只承担数据持久化的功能
 
@@ -861,6 +914,88 @@ public CommonResult<T> update(Entity entity) {
 }
 ```
 
+### 单节点Redis在并发情况下的问题
+
++ 数据丢失问题：Redis是基于内存的，服务重启就会导致数据丢失   ---- **Redis持久化机制**
++ 并发能力问题：单节点Redis并发能力强，但是遇到再高并发的场景，也无法满足需求  ---- **Redis主从集群，读写分离**
++ 故障恢复问题：单节点Redis宕机，服务不可用，需要一种自动故障恢复手段  ----  **Redis哨兵机制，检测结点的状态**
++ 存储能力的问题：Redis基于内存，单节点Redis难以满足缓存海量数据的要求  ----  **搭建分片集群，利用插槽机制实现动态扩容**
+
+
+
+**Redis持久化**
+
+RDB机制，Redis数据快照，简单来说就是把内存中的所有数据都记录到磁盘中，当Redis实例故障重启后，从磁盘读取快照，恢复数据
+
+`Redis停机的时候会自动执行一次RDB操作`
+
+Redis中有两个命令完成RDB持久化操作
+
+<img src="Redis部分.assets/image-20220731162911848.png" alt="image-20220731162911848" style="zoom:80%;" />
+
+
+
+更推荐使用bgsave，save命令的执行会阻塞其他针对redis的读写操作
+
+Redis的配置文件中配置了触发RDB机制：
+
+```conf
+#默认执行的都是bgsave命令
+save 900 1
+save 300 10
+save 60 10000
+```
+
+RDB写入磁盘时的流程：
+
++ 首先主进程会fork出一个子进程，这个过程是阻塞过程
++ 子进程复制一份主进程的页表，这样，子进程和主进程页表映射的都是同一块内存地址空间
++ 在子进程进行持久化操作时，会将持久化部分的内存设置为只读，即只能进行读取操作
++ 如果主进程仍然想要进行写操作，会将需要写操作的数据从只读空间中拷贝一份，进行更新操作，并不会阻塞子进程的持久化操作
++ 最后将新写的RDB文件去替换原来旧的RDB文件
++ 新写的那部分内容只能等待下一次持久化时，才能更新到磁盘上
+
+<img src="Redis部分.assets/image-20220731164759916.png" alt="image-20220731164759916" style="zoom:80%;" />
+
+
+
+AOF机制,Redis每处理一个**写命令**，都会将命令追加到AOF文件中
+
+<img src="Redis部分.assets/image-20220731165845343.png" alt="image-20220731165845343" style="zoom:80%;" />
+
+
+
+在Redis配置文件中也设置了一些与AOF有关的配置：
+
+```conf
+#Redis默认关闭AOF机制
+appendonly no 
+appendfilename "appendonly.aof"  #默认的AOF文件名
+
+appendfsync always  #每执行一次写命令，立即记录到AOF文件，性能比较差，但数据几乎不会丢失
+appendfsync everysec  #每隔一秒将缓冲区的数据写到AOF文件，默认方案
+appendfsync no     #写命令执行完成之后先放入AOF缓冲区，由操作系统决定何时将缓冲区的数据写到磁盘，数据丢失问题比较严重
+```
+
+AOF显而易见的一个缺陷就是：不论什么写命令，Redis都会将命令写到aof文件中，这样会导致文件的体积过大；如果对同一个key的多次写操作，只有最后一次有用，但aof仍然会记录前几次的命令
+
+所以，Redis提供了bgrewriteaof命令，对aof文件重写，以最少的命令打到相同的效果
+
+<img src="Redis部分.assets/image-20220731170638395.png" alt="image-20220731170638395" style="zoom:80%;" />
+
+
+
+Redis也会自动触发对AOF文件的重写，在配置文件中：
+
+```conf
+auto-aof-rewrite-percentage 100   #AOF文件比上次文件增加超过多少时，触发重写，默认是增加一倍
+auto-aof-rewrite-min-size 64mb    #AOF文件体积达到多大时，触发重写，默认是64mb
+```
+
+
+
+
+
 ## 附录 Redis在秒杀业务中的应用
 
 ### 全局唯一ID
@@ -914,3 +1049,190 @@ public long getId(String keyPrefix) {  //keyPrefix对应于不同业务
 ```
 
 > 这种全局唯一ID不是固定的，可以根据实际情况做一定的修改
+
+### 模拟商城秒杀业务
+
+实现优惠券秒杀下单功能，基本要求有两个：
+
++ 在抢购时，判断秒杀业务是否开启或结束，如果不在秒杀时间内，无法下单
++ 判断优惠券库存是否充足，不足则无法下单
+
+基本流程图：
+
+<img src="Redis部分.assets/image-20220731144416621.png" alt="image-20220731144416621" style="zoom:80%;" />
+
+基本业务代码：
+
+```java
+@Override
+@Transactional  //由于修改了两张表（库存表和订单表），需要加上事务来保证数据的一致性
+public Result seckillVoucher(Long voucherId) {
+    //1. 根据优惠券id查询优惠券信息
+    SeckillVoucher seckillVoucher = iSeckillVoucherService.getById(voucherId);
+    //2. 判断当前时间是否是秒杀时间
+    if (seckillVoucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        return Result.fail("抢购尚未开始");
+    }
+
+    if(seckillVoucher.getEndTime().isBefore(LocalDateTime.now())) {
+        return Result.fail("抢购已经结束");
+    }
+
+    //3. 判断秒杀券的库存是否充足
+    if (seckillVoucher.getStock() < 1) {
+        return Result.fail("优惠券已售完");
+    }
+    //4. 如果库存充足，则扣减库存
+    boolean isSuccess = iSeckillVoucherService.update().setSql("stock = stock - 1")
+            .eq("voucher_id", voucherId).update();
+    if(!isSuccess) {
+        return Result.fail("抢购失败");
+    }
+    //5. 创建订单
+    VoucherOrder voucherOrder = new VoucherOrder();
+    //5.1 生成订单id
+    long orderId = redisIdWorker.getId("order");
+    voucherOrder.setId(orderId);
+    //5.2 设置用户id
+    Long userId = UserHolder.getUser().getId();
+    voucherOrder.setUserId(userId);
+    //5.3 设置当前购买的代金券的id
+    voucherOrder.setVoucherId(voucherId);
+    //6. 将订单保存至数据库
+    save(voucherOrder);
+    return Result.ok(orderId);
+}
+```
+
+**基本功能下的超卖问题**
+
+使用jmeter压测工具，配置请求秒杀的线程组（带上登录token），对系统进行测试，会出现商品超卖的问题
+
+设置200个线程请求模拟秒杀请求，执行完毕后数据库状态：
+
+<img src="Redis部分.assets/image-20220731150624606.png" alt="image-20220731150624606" style="zoom:80%;" />
+
+查看订单表，有109条数据
+
+解决方案：加锁
+
+（1）加悲观锁，比如synchronized，Lock等，或者数据库上的表锁
+
+（2）加乐观锁，在线程更新时去判断有没有其他线程修改过，如果没有，则直接修改
+
+为保证高并发情况下的性能问题，可以加乐观锁比较并交换，解决思路：
+
+<img src="Redis部分.assets/image-20220731151341826.png" alt="image-20220731151341826" style="zoom:80%;" />
+
+修改代码的第四步更新数据库语句：
+
+```java
+//4. 如果库存充足，则扣减库存
+//update tb set stock = stock - 1 where voucher_id = ? and  stock > 0
+boolean isSuccess = iSeckillVoucherService.update().setSql("stock = stock - 1") 
+        .gt("stock", 0)   //添加乐观锁机制，在扣减库存时，判断其他线程是否已经修改过线程，提高乐观锁的成功率，比较大于0即可  
+        .eq("voucher_id", voucherId).update();
+```
+
+进一步优化：“一人一单”
+
+一般优惠券的优惠力度比较大，商家常见的要求就是一个限购多少单，而之前的业务不具备这样的功能，所以需要进一步优化成一人一单，基本流程：
+
+只需要添加一层判断即可
+
+<img src="Redis部分.assets/image-20220731153936682.png" alt="image-20220731153936682" style="zoom:80%;" />
+
+在第四步扣减库存之前，添加业务代码：
+
+```java
+Long userId = UserHolder.getUser().getId();
+
+//优化：实现一人一单，在扣减库存之前，判断该用户是否下过单
+QueryWrapper<VoucherOrder> wrapper = new QueryWrapper<>();
+//根据用户id和优惠券id查询订单表
+wrapper.eq("user_id", userId);
+wrapper.eq("voucher_id", voucherId);
+int count = count(wrapper);
+if(count > 0) {
+    //如果已经下过单了，则返回
+    return Result.fail("一人最多只能购买一单");
+}
+```
+
+仅仅添加判断是不行的，使用jmeter进行压测的时候发现一个用户依然能够下多单，这是因为，在多线程情况下，会有多个线程同时判断count > 0，多个线程也会同时判断成功，那么仍然会有多个线程下单成功，虽然不是全部，但也没有解决一开始的问题
+
+而这里的解决方案只能添加悲观锁，将判断、扣减库存的操作全部加锁，仅适合单体服务，因为加的是JVM层面的锁
+
+分布式锁优化：使用Redisson作为分布式锁工具，在判断库存是否充足之后，添加获取分布式锁的步骤
+
+```java
+//获取Redis分布式锁
+RLock lock = redissonClient.getLock("lock:order:" + userId);
+//尝试获取锁
+boolean isLock = lock.tryLock();
+if(!isLock) {
+    return Result.fail("不允许重复下单");
+}
+try {
+    //优化：实现一人一单，在扣减库存之前，判断该用户是否下过单
+    QueryWrapper<VoucherOrder> wrapper = new QueryWrapper<>();
+    //根据用户id和优惠券id查询订单表
+    wrapper.eq("user_id", userId);
+    wrapper.eq("voucher_id", voucherId);
+    int count = count(wrapper);
+    if(count > 0) {
+        //如果已经下过单了，则返回
+        return Result.fail("一人最多只能购买一单");
+    }
+
+    //4. 如果库存充足，则扣减库存
+    //update tb set stock = stock - 1 where voucher_id = ? and  stock > 0
+    boolean isSuccess = iSeckillVoucherService.update().setSql("stock = stock - 1")
+            .gt("stock", 0)   //添加乐观锁机制，在扣减库存时，判断其他线程是否已经修改过线程
+            .eq("voucher_id", voucherId).update();
+    if(!isSuccess) {
+        return Result.fail("抢购失败");
+    }
+    //5. 创建订单
+    VoucherOrder voucherOrder = new VoucherOrder();
+    //5.1 生成订单id
+    long orderId = redisIdWorker.getId("order");
+    voucherOrder.setId(orderId);
+    //5.2 设置用户id
+    voucherOrder.setUserId(userId);
+    //5.3 设置当前购买的代金券的id
+    voucherOrder.setVoucherId(voucherId);
+    //6. 将订单保存至数据库
+    save(voucherOrder);
+    return Result.ok(orderId);
+} finally {
+    lock.unlock();  //释放锁
+}
+```
+
+到这里整个秒杀业务差不多就完成了
+
+### 秒杀业务优化
+
+当前秒杀业务的结构：整个业务流程执行完毕之后，才能给用户响应，用户体验并不是很好
+
+<img src="Redis部分.assets/image-20220801110001637.png" alt="image-20220801110001637" style="zoom:80%;" />
+
+观察Tomcat中的业务流程，整个业务可以分为两个部分：
+
++ 判断用户是否能够购买秒杀优惠券（a. 库存是否充足  b. 用户是否是第一次购买）
++ 创建订单扣减库存
+
+所以，完全可以将整个业务流程分为两部分，在判断用户有购买资格之后，立即向用户返回购买成功的信息，后续再去保存订单和扣减库存以及之后的用户支付，一般这个中间件由MQ去做，不过毕竟是Redis部分的总结，所以使用Redis来完成，整个流程是相似的
+
+> 这有点像平常去餐厅吃饭，先点餐，点完之后上菜就能吃，吃完之后再付款
+>
+> 这就相当于后台先给你返回一个信息说直接能吃了，然后后台再给你做菜以及处理你的订单
+
+由于使用的测试秒杀业务是一个单体服务，没办法再继续划分出两个服务，可以使用多线程来实现，一个线程专门用于判断用户是否有资格购买秒杀券，另一个线程专门用于去操作数据库，整体的架构也就变成：
+
+<img src="Redis部分.assets/image-20220801112139146.png" alt="image-20220801112139146" style="zoom:80%;" />
+
+流程图：
+
+<img src="Redis部分.assets/image-20220801112400812.png" alt="image-20220801112400812" style="zoom:80%;" />
