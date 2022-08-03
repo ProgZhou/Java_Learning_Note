@@ -171,6 +171,12 @@ kafka是分布式的，一个数据多个副本，少数机器宕机不会丢失
 
 单机吞吐量十万级，可用性非常高，分布式架构，消息可以做到0丢失，支持10亿级别的消息堆积
 
+
+
+几种消息队列的对比：
+
+<img src="RabbitMQ.assets/image-20220802143929030.png" alt="image-20220802143929030" style="zoom:80%;" />
+
 ## 二、RabbitMQ
 
 ### 2.1 RabbitMQ的基本概念
@@ -1837,3 +1843,320 @@ public void receive(Object object, Student student, Channel channel) {
     }
 }
 ```
+
+
+
+## 总结：RabbitMQ相关总结
+
+### MQ的常见问题
+
++ 消息可靠性问题：由于网络的原因，消息不能保证百分之百到达目的地，如何确保消费者发送的消息至少被消费一次
++ 延迟消息问题：有些业务需要消息在指定时间发送和消费，如何实现消息的延迟投递
++ 消息堆积问题：当消费者处理消息的效率不高，在一些高并发的情况下，如何解决消息对接问题
++ 高可用问题：服务之间的通信高度依赖消息队列，如何避免单点的MQ故障而导致的不可用问题
+
+### 消息可靠性问题
+
+消息丢失的情况：
+
++ 发送时丢失：
+  + 生产者发送的消息未送达交换机，即发送阶段一出现消息丢失的情况
+  + 消息到达交换机，交换机在转发的过程中消息丢失，即发送阶段二出现消息丢失的情况
++ MQ宕机导致的消息丢失：消息成功到达队列中，但消息队列宕机，消息丢失（RabbitMQ基于内存存储）
++ 消费者接收到消息后未处理完成即宕机，即消费阶段的消息丢失
+
+<img src="RabbitMQ.assets/image-20220802171026975.png" alt="image-20220802171026975" style="zoom:80%;" />
+
+**生产者消息确认**
+
+RabbitMQ提供了publisher confirm机制来避免消息发送到MQ过程中丢失，消息发送到MQ以后，会返回一个结果给发送者，表示消息是否投递成功：
+
++ `publisher-confirm`发送者确认
+  + 消息成功投递到队列时，发送ack确认
+  + 消息未投递到交换机，发送nack
++ `publisher-return`发送者回执
+  + 消息投递到交换机了，向生产者发送ack，如果后续没有到达队列，则会返回消息失败投递失败的原因
+
+<img src="RabbitMQ.assets/image-20220802172047385.png" alt="image-20220802172047385" style="zoom:80%;" />
+
+消息队列在给生产者返回回执的时候，会携带一个消息的唯一标识，表示哪条消息投递成功或者失败了，方便生产者后续的处理
+
+**SpringAMQP对消息确认机制的实现**
+
+（1）首先要在项目配置文件中添加确认机制
+
+```yml
+spring:
+  rabbitmq:
+    host: localhost
+    port: 5672
+    virtual-host: /demo2
+    username: guest
+    password: guest
+    publisher-confirm-type: correlated
+    publisher-returns: true    #开启消息的returnCallback，默认关闭
+    template:
+      mandatory: true
+```
+
++ `publish-confirm-type`开启publisher-confirm，支持两种类型：
+  + simple：同步等待确认结果，直到超时
+  + correlated：异步回调，定义ConfirmCallback，MQ返回结果时会回调这个ConfirmCallback
++ `publish-returns`开启publish-return功能，同样是基于回调机制，ReturnCallback
++ `template.mandatory`定义消息路由失败时的策略，true调用ReturnCallback；false直接将消息丢弃
+
+（2）ReturnCallback，每个RabbitTemplate只能配置一个ReturnCallback，可以在项目加载的时候配置
+
+```java
+@Configuration
+@Slf4j
+public class CommonConfig implements ApplicationContextAware {  //在项目启动时运行
+
+    //returnCallback一个RabbitTemplate只能有一个
+    @Override
+    public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
+        RabbitTemplate rabbitTemplate = applicationContext.getBean(RabbitTemplate.class);
+        rabbitTemplate.setReturnCallback((message, replyCode, replyText, exchange, routingKey) ->
+                log.debug("消息未成功到达队列，响应码: {}, 原因: {}, 交换机: {}, 路由键: {}, 消息: {}",
+                replyCode, replyText, exchange, routingKey, message));
+        //后续步骤，如果有需要可以进行消息的重发
+    }
+}
+```
+
+（3）ConfirmCallback，确认，如果消息平安到达目标队列中，即返回ack，如果消息从生产者发送到交换机时出错，则返回nack
+
+ConfirmCallback可以在消息发送的时候配置
+
+```java
+@Test
+public void testSendMessage2SimpleQueue() throws InterruptedException {
+    String routingKey = "csimple.test";
+    String message = "hello, spring amqp!";
+    //uuid为消息的唯一标识
+    CorrelationData correlationData = new CorrelationData(UUID.randomUUID().toString());
+    //添加回调函数，两个回调，一个发送成功的回调，一个发送失败的回调
+    correlationData.getFuture().addCallback(confirm -> {
+        if(confirm.isAck()) {
+            log.info("消息成功投递到交换机，消息id: {}", correlationData.getId());
+        } else {
+            log.debug("消息投递到交换机失败，消息id: {}", correlationData.getId());
+        }
+    }, throwable -> log.debug("消息发送失败: {}", throwable.toString()));
+    rabbitTemplate.convertAndSend("amq.topic", routingKey, message, correlationData);
+}
+```
+
+**消息持久化**
+
+消息丢失的另一个重要原因是，RabbitMQ是基于内存存储的，如果重启的话就会导致消息的丢失，一个好的办法就是将消息和队列设置为可持久化的，类似于Redis的持久化机制，等到RabbitMQ重启的时候，消息可以恢复到队列中
+
+（1）交换机持久化：在声明交换机的时候，添加一个参数即可
+
+```java
+@Bean  //创建一个持久化队列
+public Exchange directExchange() {
+    //第二个参数即表示是否持久化
+    //第三个参数是是否自动删除，如果与这个交换机绑定的队列全部被删除了，这个交换机是否需要自动删除，一般都为false
+    return new DirectExchange( "durable.simple.exchange", true, false);
+}
+```
+
+（2）队列持久化：在声明队列的时候也添加一个持久化参数
+
+```java
+@Bean
+public Queue durableQueue() {
+    return new Queue("durable.queue", true);
+}
+```
+
+默认情况下，一般声明的交换机和队列都是持久化的
+
+（3）消息持久化：在发送消息的时候，指定消息为持久化消息
+
+```java
+@Test
+    public void testDurableMessage() {
+        String routingKey = "durable.test";
+        String message = "test durable message";
+        Message msg = MessageBuilder.withBody(message.getBytes(StandardCharsets.UTF_8))
+                .setDeliveryMode(MessageDeliveryMode.PERSISTENT)
+                .build();
+        rabbitTemplate.convertAndSend("durable.simple.exchange", routingKey, msg);
+    }
+```
+
+**消费者消息确认**
+
+消息最终会被消费者消费，但也不能保证消费者一定能够正常消费消息，如果不做任何处理，消费者在处理消息的时候发生异常，消息就会被丢弃，这显然是一种不安全的方案，所以RabbitMQ支持消费者确认机制，即消费者处理消息后可以向MQ发送ack确认，MQ收到ack确认之后才会将消息从队列中删除，SpringAMQP允许配置三种确认模式：
+
++ manaul：手动ack，需要在业务代码执行结束之后，调用自己编写的api发送ack
++ auto：自动ack，由spring监测listener代码是否出现异常，没有异常则返回ack，抛出异常则返回nack（由AOP完成）
++ none：关闭ack，MQ将消息投递给消费者之后直接删除
+
+如果想要使用SpringAMQP的消费者确认机制，需要在配置文件（消费者端）中开启消费者确认机制
+
+```yml
+spring:
+  rabbitmq:
+    host: localhost
+    port: 5672
+    virtual-host: /demo2
+    username: guest
+    password: guest
+    listener:
+      simple:
+        prefetch: 1   #消息预取的处理
+        acknowledge-mode: auto
+```
+
+**消费者失败重试**
+
+消费者消息处理失败，默认情况下MQ会将消息重新入队，也就是说消费者仍然可以从队列中获取消息并处理，然后又失败又入队，陷入一个死循环，这会导致MQ的消息处理飙升，给MQ带来巨大的压力
+
+所以Spring也提供了消息失败的重试机制，当消费者出现异常时，利用本地重试而不是无限制的重新入队到MQ中，也需要对配置文件进行一定的修改
+
+```yml
+spring:
+  rabbitmq:
+    host: localhost
+    port: 5672
+    virtual-host: /demo2
+    username: guest
+    password: guest
+    listener:
+      simple:
+        prefetch: 1
+        acknowledge-mode: auto
+      direct:
+        retry:   #重试机制
+          enabled: true   #开启消费者失败重试
+          initial-interval: 1000   #初次失败之后等待多少ms之后进行重试
+          multiplier: 3   #下次失败的等待时长的倍数，比如第一次失败等待1s重试，下次就需要等待3s，再下次需要等待9s以此类推
+          max-attempts: 4  #最大重试次数，如果重试了这么多次还没成功，默认会直接丢弃消息
+```
+
+在SpringAMQP中还能够配置消息消费失败之后的策略，默认是丢弃消息：
+
++ `RejectAndDontRequeueRecoverer`重试耗尽之后，直接拒绝消息，丢弃
++ `ImmediateRequeueMessageRecoverer`重试耗尽后，返回nack，消息重新入队
++ `RepublishMessageRecoverer`重试耗尽之后，将消息投递到指定的交换机
+
+<img src="RabbitMQ.assets/image-20220802205936900.png" alt="image-20220802205936900" style="zoom:80%;" />
+
+一般可以采用最后一种，在消息队列中声明专门用于转发处理失败消息的交换机和存放消息的队列
+
+```java
+//声明专门转发处理失败消息的交换机
+@Bean
+public Exchange errorExchange() {
+	return new DirectExchange("error.message.exchange", true, false);
+}
+
+//声明专门存放错误消息的队列
+@Bean
+public Queue errorQueue() {
+    return new Queue("error.queue", true);
+}
+
+//绑定关系
+@Bean
+public Binding errorQueueBinding() {
+    return new Binding("error.queue", Binding.DestinationType.QUEUE,
+            "error.message.exchange", "error.msg", null);
+}
+
+//消费者消息处理失败之后的策略
+@Bean
+public MessageRecoverer messageRecoverer(RabbitTemplate rabbitTemplate) {
+    return new RepublishMessageRecoverer(rabbitTemplate, "error.message.exchange", "error.msg");
+}
+```
+
+### 延迟消息
+
+死信：当一个队列中的消息满足下列情况之一时，就称为死信
+
++ 消费者处理消息失败，并且消息的requeue参数设置为false
++ 消息是一个过期消息，超时无人消费
++ 要投递的队列消息堆积满了，最早的消息可能成为死信
+
+如果队列配置了dead-letter-exchange属性，指定了一个交换机，那么队列中的死信就会投递到这个交换机中，而这个交换机就称为死信交换机
+
+<img src="RabbitMQ.assets/image-20220803171446249.png" alt="image-20220803171446249" style="zoom:80%;" />
+
+TTL，即消息的存活时间，如果队列中的消息在TTL结束时仍未被消费，则会变为死信，ttl超时分为两种情况：
+
++ 消息所在的队列设置了存活时间
++ 消息本身设置了存活时间
++ 如果两者都由，取小的那个
+
+利用延迟队列结合死信交换机，就可以实现消息发出之后，消费者延迟收到消息的效果，这种消息模式就称为延迟队列模式
+
+延迟队列的使用场景包括：
+
++ 延迟发送短信
++ 用户下单，在几分钟内未支付，则自动取消
+
+（1）创建普通交换机和普通队列
+
+```java
+@Configuration
+public class TTLMessageConfig {
+
+    @Bean
+    public Exchange ttlExchange() {
+        return new DirectExchange("ttl.direct", true, false);
+    }
+
+    @Bean
+    public Queue ttlQueue() {
+        return QueueBuilder.durable("ttl.queue")
+                .ttl(10000)   //延迟时间10s
+                .deadLetterExchange("dl.direct")
+                .deadLetterRoutingKey("dl")
+                .build();
+    }
+
+    @Bean
+    public Binding ttlBinding() {
+        return new Binding("ttl.queue", Binding.DestinationType.QUEUE,
+                "ttl.direct", "ttl",null);
+    }
+
+}
+```
+
+（2）创建延迟交换机和延迟队列，可以直接在消费者中创建
+
+```java
+@RabbitListener(bindings = @QueueBinding(
+        value = @Queue(name = "dl.queue", durable = "true"),
+        exchange = @Exchange(name = "dl.direct"),
+        key = "dl"
+))   //这种方式编写的RabbitListener注解也可以有创建队列和交换机的功能
+public void listenTTLQueue(String message) {
+    log.info("消费者收到了延迟消息: {}", message);
+}
+```
+
+> 本质上，延迟队列和延迟交换机是普通的交换机和队列
+
+### 消息堆积问题
+
+当生产者发送消息的速度超过了消费者处理消息的速度，就会导致队列中的消息堆积，直到队列存储消息达到上限，最早接收到的消息可能就会成为死信，默认会被丢弃，在一些消息比较重要的场合是不允许出现的
+
+一般解决消息堆积有三种主要思路：
+
++ 增加更多的消费者，提高消息消费的速度
++ 在消费者内开启线程池，多线程加快消息处理速度
++ 扩大队列的容积，提高堆积上限
+
+**惰性队列**
+
+从RabbitMQ3.6.0版本开始，就增加了惰性队列的概念，特征有：
+
++ 接收到的消息直接存入磁盘而非内存
++ 消费者要接收消息时才会从磁盘中读取并加载到内存（时间就会消耗的比较多）
++ 支持数百万消息的存储（取决于磁盘大小）
