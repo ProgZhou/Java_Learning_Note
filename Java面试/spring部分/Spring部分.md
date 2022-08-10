@@ -1105,7 +1105,64 @@ Bean4{home='C:\Program Files\AdoptOpenJDK\jdk-11.0.10.9-hotspot', version='11.0.
 
 ## 附录5 常见的Bean工厂后处理器
 
+BeanFactory的作用：为BeanFactory提供扩展
 
+**ConfigurationClassPostProcessor**
+
+这个Bean工厂后处理器可以解析`@ComponentScan`，`@Bean`，`@Import`等
+
+以解析@ComponentScan注解为例，简化一下，大概的实现是这样的：
+
++ 第一步：查找指定类上是否加上了@ComponentScan注解
++ 第二步：如果加上了，则获取注解属性中扫描的所有包路径，循环遍历
++ 第三步：将包路径转换为Spring能够识别的文件路径，并判断这些包下的类是否加上了@Component注解或者@Component注解的派生注解（类似于@Service, @Controller, @Mapper这样的）
++ 第四步：如果加上了上述注解，则创建相关类的BeanDefinition，并通过生成Bean名称的工具类生成Bean的名称
++ 第五步：将这些Bean加入到BeanFactory的容器中
+
+```java
+//查找目标类上是否有指定注解
+        ComponentScan componentScan = AnnotationUtils.findAnnotation(Config.class, ComponentScan.class);
+        if(componentScan != null) {
+            //获取注解的basePackage属性，因为可以设置多个包路径，所以是个数组
+            for (String s : componentScan.basePackages()) {
+                System.out.println(s);
+                //将包路径转换为文件路径
+                //比如com.java.another.demo6.bag -> classpath*:com/java/another/demo6/bag/**/*.class
+                String path = "classpath*:" + s.replace(".", "/") + "/**/*.class";
+                System.out.println(path);
+                //获取类的源信息
+                CachingMetadataReaderFactory factory = new CachingMetadataReaderFactory();
+                Resource[] resources = context.getResources(path);
+                //根据注解生成bean的名字
+                AnnotationBeanNameGenerator generator = new AnnotationBeanNameGenerator();
+                for (Resource resource : resources) {
+//                    System.out.println(resource);
+                    //获取类的源信息
+                    MetadataReader reader = factory.getMetadataReader(resource);
+                    //获取扫描的类的类名
+                    System.out.println("类名: " + reader.getClassMetadata().getClassName());
+                    boolean hasComponent = reader.getAnnotationMetadata().hasAnnotation(Component.class.getName());
+                    boolean hasComponentSon = reader.getAnnotationMetadata().hasMetaAnnotation(Component.class.getName());
+                    //判断类上是否加了xxx注解
+                    System.out.println("是否加上@Component注解" + hasComponent);
+                    System.out.println("是否加上@Component的派生注解" + hasComponentSon);
+
+                    if(hasComponent || hasComponentSon) {
+                        //如果加了@Component注解以及其派生注解，则创建Bean定义
+                        AbstractBeanDefinition bd = BeanDefinitionBuilder
+                                .genericBeanDefinition(reader.getClassMetadata().getClassName())
+                                .getBeanDefinition();
+                        //将bean加入到容器中
+                        DefaultListableBeanFactory beanFactory = context.getDefaultListableBeanFactory();
+                        String name = generator.generateBeanName(bd, beanFactory);
+                        beanFactory.registerBeanDefinition(name, bd);
+
+                    }
+                }
+
+            }
+        }
+```
 
 ## 附录6 Spring中的Scope
 
@@ -1334,3 +1391,294 @@ cglib动态代理的特点：
 + 目标类就不能加final关键字，因为final类不能创建子类
 + 目标类中的方法也不能用final修饰，因为代理类是通过方法重写的方式增强方法的
 + 在MethodInterceptor中（作用和InvocationHandler类似）提供了一个MethodProxy，可以不通过反射去调用目标方法
+
+### Spring中jdk动态代理的原理
+
+**最简单的代理**
+
+首先模仿spring，先手写一个类似于spring中的动态代理的代码：
+
+```java
+public class JDKProxyTheoryTest {
+    //测试接口
+    interface Foo {
+        void foo();
+    }
+    //将不确定的增强功能抽取出来单独写成一个接口
+    interface InvocationHandler {
+        void invoke();
+    }
+	//目标类和目标方法
+    static class TargetClass implements Foo {
+
+        @Override
+        public void foo() {
+            System.out.println("target class function foo()");
+        }
+    }
+
+    public static void main(String[] args) {
+        Foo proxy = new $Proxy0(() -> {
+            //1. 功能增强
+            System.out.println("添加的功能");
+            //2. 调用目标方法
+            new TargetClass().foo();
+        });
+
+        proxy.foo();
+    }
+}
+
+输出：
+添加的功能
+target class function foo()
+```
+
+以及目标类的代理类：
+
+```java
+public class $Proxy0 implements JDKProxyTheoryTest.Foo {
+	//传入需要增强的功能
+    private JDKProxyTheoryTest.InvocationHandler handler;
+
+    public $Proxy0(JDKProxyTheoryTest.InvocationHandler handler) {
+        this.handler = handler;
+    }
+
+    //调用增强之后的方法即可
+    @Override
+    public void foo() {
+        handler.invoke();
+    }
+}
+```
+
+**简单代理存在的问题**
+
+由于上面的代码中的接口只有一个方法，那么增强方法在调用目标方法的时候可以直接调用到目标方法，但是实际上接口一般会有多个方法，那么当代理对象在调用方法的时候，就不能确定被调用的方法了
+
+解决方法就是可以使用反射中的方法对象，在代理对象中，可以将要调用的方法作为参数传递给增强方法
+
+```java
+public class JDKProxyTheoryTest {
+    //测试接口
+    interface Foo {
+        void foo() throws NoSuchMethodException;
+        void bar() throws NoSuchMethodException;
+    }
+    //将不确定的增强功能抽取出来单独写成一个接口
+    interface InvocationHandler {
+        //method代表被增强的方法，args为方法所需要的参数
+        void invoke(Method method, Object[] args);
+    }
+
+    static class TargetClass implements Foo {
+
+        @Override
+        public void foo() {
+            System.out.println("target class function foo()");
+        }
+
+        @Override
+        public void bar() {
+            System.out.println("target class function bar()");
+        }
+    }
+
+    public static void main(String[] args) {
+        Foo proxy = new $Proxy0((method, params) -> {
+            //1. 功能增强
+            System.out.println("添加的功能");
+            //2. 调用目标方法
+            try {
+                //在调用时，通过反射中的方法对象进行调用
+                method.invoke(new TargetClass(), params);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+
+        try {
+            proxy.foo();
+            proxy.bar();
+        } catch (NoSuchMethodException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+输出：
+添加的功能
+target class function foo()
+添加的功能
+target class function bar()
+```
+
+修改后的代理类：
+
+```java
+public class $Proxy0 implements JDKProxyTheoryTest.Foo {
+
+    private JDKProxyTheoryTest.InvocationHandler handler;
+
+    public $Proxy0(JDKProxyTheoryTest.InvocationHandler handler) {
+        this.handler = handler;
+    }
+
+    @Override
+    public void foo() throws NoSuchMethodException {
+        //获取被增强方法的方法对象
+        Method foo = JDKProxyTheoryTest.Foo.class.getDeclaredMethod("foo");
+        handler.invoke(foo, new Object[0]);
+    }
+
+    @Override
+    public void bar() throws NoSuchMethodException {
+        Method bar = JDKProxyTheoryTest.Foo.class.getDeclaredMethod("bar");
+        handler.invoke(bar, new Object[0]);
+    }
+}
+```
+
+**进一步改进**
+
+上述的程序中，接口中方法都没有返回值，实际情况中可能有些方法是有返回值的，所以需要修改InvocationHandler中的invoke方法，使其返回一个结果，为了通用，返回Object，spring中设计这个InvocationHandler时，还会将代理对象传入（一般用不太到）
+
+```java
+//将不确定的增强功能抽取出来单独写成一个接口
+interface InvocationHandler {
+    //method代表被增强的方法，args为方法所需要的参数
+    Object invoke(Object proxy, Method method, Object[] args);
+}
+```
+
+实际上，这个InvocationHandler的设计已经和Spring中的很像了（Spring中的InvocationHandler是java.lang.reflect包下的），而Spring中在设计代理类的时候，还会让代理类去继承一个Proxy的类（java.lang.reflect），这个类中内含了一个InvocationHandler，所以实际上的代理对象可以这么写：
+
+```java
+public class $Proxy0 implements JDKProxyTheoryTest.Foo {
+
+    //可以在静态代码块中统一获取一次方法对象
+    static Method foo;
+    static Method bar;
+    static Method add;
+    
+    static {
+        try {
+            
+        } catch (NoSuchMethodException e) {
+            //检查型异常需要变成运行时异常抛出
+            throw new NoSuchMethodError(e.getMessage());
+        }
+    }
+    
+    public $Proxy0(JInvocationHandler handler) {
+        super(handler);
+    }
+
+    @Override
+    public void foo() throws NoSuchMethodException {
+        try {
+            handler.invoke(this, foo, new Object[0]);
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable e) {
+            throw new UndeclareThrowableException(e);
+        }
+    }
+
+    @Override
+    public void bar() throws NoSuchMethodException {
+        try {
+            handler.invoke(this, bar, new Object[0]);
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable e) {
+            throw new UndeclareThrowableException(e);
+        }
+        
+    }
+
+    @Override
+    public int add(){
+        try {
+            Object result = handler.invoke(this, add, new Object[0]);
+        	return (int) result;
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable e) {
+            throw new UndeclareThrowableException(e);
+        }
+    }
+}
+```
+
+### Spring中的cglib动态代理
+
+结合JDK动态代理的实现，cglib动态代理类似于：
+
+```java
+public class Target {  //目标类
+    public void save() {
+        System.out.println("target class save()");
+    }
+
+    public void save(int i) {
+        System.out.println("target class save(int) : " + i);
+    }
+
+    public void save(long l) {
+        System.out.println("target class save(long) : " + l);
+    }
+}
+
+//代理类，继承目标类
+public class Proxy extends Target{
+	//cglib代理中在MethodInterceptor中实现增强功能
+    private MethodInterceptor methodInterceptor;
+
+    static Method save0;
+    static Method save1;
+    static Method save2;
+    static {
+        try {
+            save0 = Target.class.getDeclaredMethod("save");
+            save1 = Target.class.getDeclaredMethod("save", int.class);
+            save2 = Target.class.getDeclaredMethod("save", long.class);
+        } catch (NoSuchMethodException e) {
+            throw new NoSuchMethodError(e.getMessage());
+        }
+    }
+
+    public Proxy(MethodInterceptor methodInterceptor) {
+        this.methodInterceptor = methodInterceptor;
+    }
+
+    ///////////////////////////带增强功能的方法
+    @Override
+    public void save() {
+        try {
+            methodInterceptor.intercept(this, save0, new Object[0], null);
+        } catch (Throwable e) {
+            throw new UndeclaredThrowableException(e);
+        }
+    }
+
+    @Override
+    public void save(int i) {
+        try {
+            methodInterceptor.intercept(this, save1, new Object[]{i}, null);
+        } catch (Throwable e) {
+            throw new UndeclaredThrowableException(e);
+        }
+    }
+
+    @Override
+    public void save(long l) {
+        try {
+            methodInterceptor.intercept(this, save2, new Object[]{l}, null);
+        } catch (Throwable e) {
+            throw new UndeclaredThrowableException(e);
+        }
+    }
+}
+```

@@ -41,6 +41,167 @@
 
 ![image-20220704200432376](JVM部分.assets/image-20220704200432376.png)
 
+> 关于方法区：
+>
+> 在Hotspot虚拟机给出的官方定义中说明了，方法区是一个线程共享的区域，用于存储每一个类的结构，包括属性字段，一些方法的元数据以及类的构造器等，方法区在JVM启动的时候进行初始化，逻辑上是堆的一部分；在jdk1.8之前，方法区的一个实现是永久代，占用的是JVM的内存空间，而在jdk1.8之后，方法区的实现变为元空间，占用的是本地内存（除了字符串常量池，在堆中）
+>
+> <img src="JVM部分.assets/image-20220806172146657.png" alt="image-20220806172146657" style="zoom:80%;" />
+>
+> 关于常量池：
+>
+> 通常字节码文件由三部分组成：类基本信息，常量池，类方法定义；其中常量池就是运行时常量池，查看字节码文件可以使用javap命令，比如下面一个字节码文件：常量池实际上就是一张表，虚拟机指令根据这张常量表找到要执行的类名，方法名，参数类型，字面量等信息
+>
+> 运行时常量池是.class文件中，当该类被加载时，它的常量池信息就会放入内存中的运行时常量池，并把里面的符号地址变为真实地址
+>
+> ```
+> #一些类的基本信息，包括类名，权限修饰符，父类信息，实现的接口等
+> Classfile /D:/Java_idea/JavaVirtualMachine/out/production/chapter02/com/jvm/StringTest.class
+>   Last modified 2022年4月6日; size 632 bytes
+>   MD5 checksum 9b12d409af85c5bcfb37039ba1fba33d
+>   Compiled from "StringTest.java"
+> public class com.jvm.StringTest
+>   minor version: 0
+>   major version: 55
+>   flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+>   this_class: #7                          // com/jvm/StringTest
+>   super_class: #8                         // java/lang/Object
+>   interfaces: 0, fields: 0, methods: 2, attributes: 1
+> #一下就是常量池，保存程序运行时的一些基本信息
+> Constant pool:
+>    #1 = Methodref          #8.#24         // java/lang/Object."<init>":()V
+>    #2 = Class              #25            // java/lang/String
+>    #3 = Methodref          #2.#24         // java/lang/String."<init>":()V
+>    #4 = Fieldref           #26.#27        // java/lang/System.out:Ljava/io/PrintStream;
+>    #5 = String             #28            // com.jvm.StringTest
+>    #6 = Methodref          #29.#30        // java/io/PrintStream.println:(Ljava/lang/String;)V
+>    #7 = Class              #31            // com/jvm/StringTest
+>    #8 = Class              #32            // java/lang/Object
+>    #9 = Utf8               <init>
+>   #10 = Utf8               ()V
+> .....
+> ```
+
+### 字符串常量池
+
+```java
+public static void main(String[] args) {
+    String s1 = "a";
+    String s2 = "b";
+    String s3 = "ab";
+}
+```
+
+上述代码转换为字节码文件就是：
+
+```
+0: ldc           #2                  // String a
+2: astore_1
+3: ldc           #3                  // String b
+5: astore_2
+6: ldc           #4                  // String ab
+8: astore_3
+9: return
+```
+
+在类加载的过程中，常量池中的信息都会被加载到运行时常量池中，这时，"a", "b", "ab"都是常量池中的符号，还没有变为java字符串对象
+
+ldc  #2  会把a符号变为"a"字符串对象
+
+ldc  #3  会把b符号变为"b"字符串对象
+
+ldc  #4  会把ab符号变为"ab"字符串对象
+
+并且将这些字符串常量放入字符串常量池中，也就是StringTable，这个StringTable是个hashtable结构，不能扩容
+
+**字符串拼接**
+
+在上述代码的基础上，进行字符串拼接：
+
+```java
+String s4 = s1 + s2;
+//上面这段代码在jdk1.8中转换成字节码之后
+new   #5
+invokespecial    #6   //StringBuilder()
+invokespecial    #7   //append()
+invokespecial    #7   //append()
+invokespecial    #8   //toString()
+//其实翻译过来就是
+new StringBuilder().append("a").append("b").toString();
+//也就是说当进行字符串拼接的时候，会创建一个中间对象StringBuilder进行拼接并返回一个新的String对象（toString()方法最后是new String()）
+//所以s3 == s4返回false
+
+//还有一种拼接：
+String s5 = "a" + "b";  //转换为字节码之后
+ldc    #4   //"ab"
+//由于"ab"在字符串常量池中已经存在了，所以s5直接就是确定为"ab"
+//s3 == s5返回true
+```
+
+**intern方法**
+
+```java
+String s = new String("a") + new String("b");
+```
+
+上面一行代码的运行过程是：先new String("a")，将"a"常量放入字符串常量池；再new String("b")，将"b"常量放入字符串常量池
+
+但两个new出来的对象都在堆中，然后进行拼接，最后其实就相当于new String("ab")，但"ab"并没有放入字符串常量池中
+
+可以调用intern方法主动将字符串放入字符串常量池，并返回串池中的对象
+
+### 类加载过程
+
+类加载的基本流程：加载、验证、准备、解析、初始化
+
+其中验证、准备、解析阶段合起来称为连接阶段
+
+**加载**
+
++ 通过一个类的全限定名来获取定义类的二进制字节流
++ 将这个字节流所代表的静态存储结构转换为方法区的运行时数据结构
+  + 将类的字节码文件载入方法区，内部采用c++的instanceKlass描述Java类，比较重要的一个field是_java_mirror，就是通常说的xxx.class
++ 在内存中生成一个代表这个类的java.lang.Class对象，作为方法区这个类的各种数据的访问入口
+  + 反射就是基于此实现的，将Java类的字节码文件加载到机器内存中，并在内存中构建出Java类的原型，指向方法去中的instanceKlass
+
+**连接**
+
++ 验证阶段：这一阶段的目的是确保Class文件的字节流中包含的信息符合《Java虚拟机规范》的全部要求，进行一些安全性检查
++ 准备阶段：为static变量分配空间，并设置默认值
+  + 在jdk1.7之后，静态变量存储在堆中
+  + 静态变量分配空间和赋值是两个步骤，分配空间在准备阶段完成，赋值在初始化阶段完成
+  + 如果是static final的基本类型或者字符串常量，比如static final String const = "aaa"，那么值在编译期就确定了，直接在准备阶段赋值
+  + 如果是static final的引用类型，那么赋值在初始化阶段
++ 解析阶段：将常量池中的符号引用解析为直接引用
+  + 这里的符号引用可以理解为某个类的全类名字符串，就比如"java.lang.String"
+  + 直接引用指的是当前类已经被加载到堆中，并且分配了对象，直接引用就是这个对象所在堆中的地址
+
+**初始化**
+
++ 初始化阶段，简单说就是调用类构造器方法，即`<clinit>()V`方法的过程，虚拟机会保证这个方法执行时的线程安全
+  + main方法所在的类，总会被先初始化
+  + 首次访问这个类的静态变量或静态方法时
+  + 子类初始化时，会保证父类已经被初始化
+  + 子类访问父类静态变量，只会触发父类的初始化
+
+懒汉式单例（内部类方式）：
+
+```java
+class Singleton {
+    private Singleton() {}
+    
+    private static class LazyHolder {
+        private static final Singleton INSTANCE = new Singleton();
+    }
+    
+    //当第一次调用这个方法时，才会触发内部类LazyHolder的加载连接初始化，从而保证INSTANCE是懒加载的
+    public static Singleton getInstance() {
+        return LazyHolder.INSTANCE;
+    }
+}
+```
+
+
+
 ### Java内存参数
 
 + -Xmx：Java虚拟机的最大内存
@@ -50,6 +211,27 @@
   + 这个有个默认值，是Eden:from:to = 8:1:1
 + -XX:NewRatio：控制整个新生代的内存比例
   + 也有个默认值Young : Old = 1 : 2
+
+### 垃圾标记
+
+**什么是“垃圾”**
+
+简单的说，内存中已经不再被使用到的空间就是垃圾
+
+**如何判断一个对象是否为“垃圾”**
+
+引用计数法（已经不使用了）
+
+可达性分析算法：也称为根路径搜索，这里的根就是GC roots，也就是一组活跃引用的集合
+
++ 基本思路就是通过一些列GC roots的对象作为起始点，从这些对象开始向下搜索，如果一个对象到GC roots没有任何引用链相连时，则说明此对象不可用，也即给定一个集合的引用作为根出发，通过引用关系遍历对象图，能被遍历到的对象就被判定为存活
+
+可以作为GC roots的对象：
+
++ 虚拟机栈中引用的对象（正在使用的局部变量）
++ 方法区中的类静态属性引用的对象
++ 方法区中常量引用的对象
++ 本地方法栈中JNI引用的对象
 
 ### JVM垃圾回收算法
 
