@@ -492,6 +492,98 @@ private void unparkSuccessor(Node node) {
     }
 ```
 
+### synchronized与Lock的区别
+
+（1）`synchronzied`是Java的关键字，属于JVM层面的内容；`Lock`是`java.util.concurrent`包下的锁，属于api层面的锁
+
++ `synchronzied`在jvm层面表现为`monitorenter`和`monitorexit`两条字节码指令，底层原理是Monitor对象
++ `Lock`是一个接口，有多种实现，比如常用的`ReentrantLock`
+
+（2）`synchronized`不需要用户手动释放锁，当线程执行完代码块中的内容时，会自动释放；即使代码块中的程序出现异常，也会释放锁
+
+`Lock`（以ReentrantLock为例）需要手动上锁和解锁，如果没有解锁就可能出现死锁的情况
+
+```java
+Lock lock = new ReentrantLock();
+lock.lock();
+try {
+    //具体业务代码
+} finally {
+    lock.unlock();  //释放锁
+}
+```
+
+（3）`synchronized`代码块中执行不可中断（不考虑wait和sleep等方法，单就synchronized关键字来说），除非程序抛出异常或执行完成自动退出，其余线程如果没获得锁只能阻塞等待
+
+`Lock`比较灵活，有尝试获取锁的`tryLock(long timeout, TimeUnit unit)`方法，如果超时就放弃释放锁进入阻塞队列等待
+
+（4）`synchronized`是非公平锁，`ReentrantLock`默认也是非公平锁，但也支持公平锁
+
+（5）`synchronized`相当于只有一个条件，因为只能绑定一个Monitor对象
+
+`ReentrantLock`可以绑定多个Condition对象，可以实现分组唤醒线程，`synchronized`要么随机唤醒一个，要么都唤醒
+
+绑定多个Condition的示例：
+
+```java
+//实现线程的轮流打印，线程1打印5次A，接着线程2打印10次B，最后线程3打印15次C，循环10次
+class ConditionLock {
+
+    private int flag;
+    private int loopNumber;
+
+    private Lock lock = new ReentrantLock();
+
+    private Condition a = lock.newCondition();
+    private Condition b = lock.newCondition();
+    private Condition c = lock.newCondition();
+
+    public ConditionLock(){}
+
+    public ConditionLock(int flag, int loopNumber) {
+        this.flag = flag;
+        this.loopNumber = loopNumber;
+    }
+
+    public void print(int status, int nextStatus, int loop, char ch) {
+        for(int i = 0; i < loopNumber; i++) {
+            lock.lock();  //上锁
+            try {
+                //1. 判断
+                while(status != flag) {
+                    if(status == 1) {
+                        a.await();
+                    } else if(status == 2) {
+                        b.await();
+                    } else {
+                        c.await();
+                    }
+                }
+                //2. 打印
+                for(int j = 0; j < loop; j++) {
+                    System.out.println(Thread.currentThread().getName() + ": " + ch);
+                }
+                //3. 通知
+                flag = nextStatus;
+                if(nextStatus == 1) {
+                    a.signal();
+                } else if(nextStatus == 2) {
+                    b.signal();
+                } else {
+                    c.signal();
+                }
+            } catch (Exception e){
+                
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+}
+```
+
+
+
 
 
 ### 阻塞队列
