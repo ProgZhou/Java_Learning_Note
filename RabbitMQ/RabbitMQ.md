@@ -1947,6 +1947,55 @@ public void testSendMessage2SimpleQueue() throws InterruptedException {
 }
 ```
 
+> 另一种配置的方式，在配置类中配置：
+>
+> ```java
+> @Autowired
+> private RabbitTemplate rabbitTemplate;
+> 
+> //定制RabbitTemplate，配置confirmCallback和returnCallback
+> @PostConstruct
+> public void initRabbitTemplate() {
+>     rabbitTemplate.setConfirmCallback(new RabbitTemplate.ConfirmCallback() {
+>         /**
+>          * 设置生产者端消息回调，只要消息成功投递到交换机就回调
+>          * @param correlationData 消息的唯一id
+>          * @param ack 消息发送是否成功
+>          * @param cause  消息发送失败的原因
+>          */
+>         @Override
+>         public void confirm(CorrelationData correlationData, boolean ack, String cause) {
+>             if(ack) {
+>                 log.info("消息发送成功！消息唯一id: {}", correlationData);
+>             } else {
+>                 log.info("消息发送失败，消息唯一id: {}, 消息发送失败的原因: {}", correlationData, cause);
+>             }
+>         }
+>     });
+> 
+>     //如果消息没有投递到指定的队列，就触发此回调
+>     rabbitTemplate.setReturnCallback(new RabbitTemplate.ReturnCallback() {
+>         /**
+>          *
+>          * @param message 投递失败的消息
+>          * @param replyCode 回复的状态码
+>          * @param replyText 回复的文本内容
+>          * @param exchange 消息发给了哪个交换机
+>          * @param routingKey 指定的路由键
+>          */
+>         @Override
+>         public void returnedMessage(Message message, int replyCode, String replyText, String exchange, String routingKey) {
+>             log.info("投递失败的消息: {}, 状态码: {}, 失败原因: {}, 目标交换机: {}, 消息的routing key: {}",
+>                     message, replyCode, replyText, exchange, routingKey);
+>         }
+>     });
+> }
+> ```
+
+
+
+
+
 **消息持久化**
 
 消息丢失的另一个重要原因是，RabbitMQ是基于内存存储的，如果重启的话就会导致消息的丢失，一个好的办法就是将消息和队列设置为可持久化的，类似于Redis的持久化机制，等到RabbitMQ重启的时候，消息可以恢复到队列中
@@ -2000,7 +2049,7 @@ public Queue durableQueue() {
 ```yml
 spring:
   rabbitmq:
-    host: localhost
+    host: localhost   
     port: 5672
     virtual-host: /demo2
     username: guest
@@ -2027,7 +2076,7 @@ spring:
     password: guest
     listener:
       simple:
-        prefetch: 1
+        prefetch: 1.
         acknowledge-mode: auto
       direct:
         retry:   #重试机制
