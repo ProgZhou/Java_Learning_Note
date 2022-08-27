@@ -338,5 +338,161 @@ df：disk free空余磁盘
 
 ```
 df [参数] #列出文件系统的整体磁盘使用量，检查文件系统的磁盘空间占用情况，常用的参数是-h意思和上面那个命令一样
+#在根目录下使用时的输出信息：
+Filesystem      Size  Used Avail Use% Mounted on
+devtmpfs        915M     0  915M   0% /dev
+tmpfs           933M     0  933M   0% /dev/shm
+tmpfs           933M  456K  933M   1% /run
+tmpfs           933M     0  933M   0% /sys/fs/cgroup
+/dev/vda1        40G  4.5G   33G  12% /
+tmpfs           187M     0  187M   0% /run/user/0
 ```
 
+lsblk：查看设备的挂载情况
+
+```
+lsblk
+#输出信息：最后的mountpoint就是挂载点
+NAME   MAJ:MIN RM SIZE RO TYPE MOUNTPOINT
+vda    253:0    0  40G  0 disk 
+└─vda1 253:1    0  40G  0 part /
+```
+
+常用参数：
+
++ `-f`：查看详细的设备挂载情况，显示文件系统信息
+
+mount / umount：挂载和卸载
+
+对于Linux用户来讲，不论有几个分区，分别分给哪一个目录使用，它总归是一个根目录，一个独立且唯一的文件结构
+
+Linux中每个分区都是用来组成整个文件系统的一部分，它在用一种叫做“挂载”的处理方法，它整个文件系统包含了一整套的文件和目录，并将一个分区和一个目录联系起来，要载入的那个分区将使它的存储空间在这个目录下获得
+
+**6. 进程管理类命令**
+
+ps：process status进程状态
+
+```
+ps aux | grep xxx   #查看系统中所有进程
+# USER：当前用户
+# PID：进程编号
+# %CPU：当前进程CPU占比
+# %MEM：进程占用内存的百分比
+# VSZ：进程占用的虚拟内存
+# RSS：进程占用的实际内存
+# TTY：进程使用的终端
+# STAT：进程状态   R：运行状态   S：睡眠状态    T：暂停状态     Z：僵尸进程，快运行完但数据还没完全清除的进程   l：多线程的进程
+# START：什么时候开始运行的
+# TIME：占用CPU的运算时间
+# COMMAND：进程的命令
+#信息显示：
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.0  0.4 178228  8524 ?        Ss   Jun06   1:32 /usr/lib/systemd/systemd 
+root           2  0.0  0.0      0     0 ?        S    Jun06   0:01 [kthreadd]
+root           3  0.0  0.0      0     0 ?        I<   Jun06   0:00 [rcu_gp]
+root           4  0.0  0.0      0     0 ?        I<   Jun06   0:00 [rcu_par_gp]
+root           6  0.0  0.0      0     0 ?        I<   Jun06   0:00 [kworker/0:0H-events_high
+root           8  0.0  0.0      0     0 ?        I<   Jun06   0:00 [mm_percpu_wq]
+root           9  0.0  0.0      0     0 ?        S    Jun06   0:00 [rcu_tasks_rude_]
+root          10  0.0  0.0      0     0 ?        S    Jun06   0:00 [rcu_tasks_trace]
+root          11  0.0  0.0      0     0 ?        S    Jun06   0:04 [ksoftirqd/0]
+
+ps -ef | grep xxx   #查看字子父进程之间的关系
+#信息显示：PPID就是父进程的pid
+UID          PID    PPID  C STIME TTY          TIME CMD
+root           1       0  0 Jun06 ?        00:01:32 /usr/lib/systemd/systemd --switched-root
+root           2       0  0 Jun06 ?        00:00:01 [kthreadd]
+root           3       2  0 Jun06 ?        00:00:00 [rcu_gp]
+root           4       2  0 Jun06 ?        00:00:00 [rcu_par_gp]
+root           6       2  0 Jun06 ?        00:00:00 [kworker/0:0H-events_highpri]
+root           8       2  0 Jun06 ?        00:00:00 [mm_percpu_wq]
+root           9       2  0 Jun06 ?        00:00:00 [rcu_tasks_rude_]
+root          10       2  0 Jun06 ?        00:00:00 [rcu_tasks_trace]
+
+```
+
+常用参数：
+
++ `a`：列出带有终端的所有用户的进程
++ `x`：列出当前用户的所有进程，包括没有终端的进程
++ `u`：面向用户友好的显示风格
++ `-e`：列出所有进程
++ `-u`：列出某个用户关联的所有进程
++ `-f`：显示完整格式的进程列表
+
+kill：终止进程
+
+```
+kill [参数] 进程号  #通过进程号杀死进程
+killall 进程名称   #通过进程名称杀死进程，可以批量停止进程
+```
+
+常用参数：
+
++ `-9`：表示强制进程立即停止
+
+top：实时监控系统进程状态，相当于windows的任务管理器
+
+```
+top [参数]
+#显示信息：默认3s更新一次
+#top: 当前执行的命令，up: 至今服务器启动了多长时间  1 user: 当前有多少个用户连接服务器  load average: 过去的1min、5min和15min系统的平均负载
+#Tasks: 当前执行的进程总数
+#%CPU: 每种进程占用CPU时间的百分比
+
+top - 11:24:10 up 81 days, 14:13,  1 user,  load average: 0.00, 0.00, 0.00
+Tasks: 118 total,   1 running, 117 sleeping,   0 stopped,   0 zombie
+%Cpu(s):  0.5 us,  0.3 sy,  0.0 ni, 98.8 id,  0.0 wa,  0.3 hi,  0.0 si,  0.0 st
+MiB Mem :   1865.8 total,    324.4 free,    813.5 used,    727.9 buff/cache
+MiB Swap:      0.0 total,      0.0 free,      0.0 used.    879.5 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND             
+ 278817 root      10 -10  127484  28940  16836 S   1.3   1.5  90:41.64 AliYunDun           
+      1 root      20   0  178228   8524   5452 S   0.0   0.4   1:32.08 systemd             
+      2 root      20   0       0      0      0 S   0.0   0.0   0:01.00 kthreadd            
+      3 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 rcu_gp              
+      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 rcu_par_gp          
+      6 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker/0:0H-events+
+      8 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 mm_percpu_wq        
+      9 root      20   0       0      0      0 S   0.0   0.0   0:00.00 rcu_tasks_rude_     
+     10 root      20   0       0      0      0 S   0.0   0.0   0:00.00 rcu_tasks_trace     
+     11 root      20   0       0      0      0 S   0.0   0.0   0:04.48 ksoftirqd/0         
+     12 root      20   0       0      0      0 I   0.0   0.0  15:16.03 rcu_sched           
+     13 root      rt   0       0      0      0 S   0.0   0.0   0:00.81 migration/0         
+     14 root      20   0       0      0      0 S   0.0   0.0   0:00.00 cpuhp/0             
+     15 root      20   0       0      0      0 S   0.0   0.0   0:00.00 cpuhp/1             
+     16 root      rt   0       0      0      0 S   0.0   0.0   0:00.85 migration/1         
+     17 root      20   0       0      0      0 S   0.0   0.0   0:01.87 ksoftirqd/1         
+     19 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker/1:0H-events+
+     21 root      20   0       0      0      0 S   0.0   0.0   0:00.00 kdevtmpfs           
+     22 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 netns               
+     23 root      20   0       0      0      0 S   0.0   0.0   0:00.00 kauditd             
+     26 root      20   0       0      0      0 S   0.0   0.0   0:01.31 khungtaskd          
+     27 root      20   0       0      0      0 S   0.0   0.0   0:00.00 oom_reaper          
+     28 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 writeback           
+     29 root      20   0       0      0      0 S   0.0   0.0   0:59.55 kcompactd0          
+     30 root      25   5       0      0      0 S   0.0   0.0   0:00.00 ksmd                
+     31 root      39  19       0      0      0 S   0.0   0.0   0:18.46 khugepaged          
+     32 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 memcg_wmark         
+     46 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 cryptd              
+```
+
+常用参数：
+
++ `-d`：指定top命令每隔几秒更新，默认是3s
++ `-i`：使top不显示任何闲置或者僵死进程
++ `-p`：通过指定监控进程ID来仅仅监控某个进程的状态
+
+netstat：显示网络状态和端口占用信息
+
+```
+netstat -anp | grep 进程号    #查看进程的网络信息
+netstat -nlp | grep 端口号    #查看网络端口号占用情况
+```
+
+常用参数：
+
++ `-a`：显示所有正在监听和未监听的套接字
++ `-n`：拒绝显示别名，能显示数字的全部转化成数字
++ `-l`：仅列出在监听的服务状态
++ `-p`：表示显示哪个进程在调用
