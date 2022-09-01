@@ -1421,6 +1421,56 @@ poll的流程是：
 
 > 可以看到poll仅仅对select能够监听的fd的上限进行了优化，其余流程几乎于select相同，性能也并没有提高多少，反而如果监听的fd越多，每次遍历消耗的时间也越久，性能反而会下降
 
+**epoll**
+
+epoll模式相对于select和poll模式有了较大的改进，它提供了三个函数：
+
+```c
+struct eventpoll {
+    struct rb_root rbr;   //红黑树，记录要监听的fd
+    struct list_head rdlist;   //链表，记录已经就绪的fd 
+};
+
+int epoll_create(int size);  //在内核空间中创建eventpoll结构体，返回对应的句柄epfd
+
+int epoll_ctl(   //这个函数将一个要监听的FD添加到eventpoll的红黑树当中，并设置一个callback函数
+//callback函数在fd就绪的时候被触发，功能是把这个就绪的fd添加到eventpoll的rdlist当中去
+    int epfd,  //epoll实例的句柄
+    int op,  //对待监听的fd将要执行的操作，包括ADD(增),MOD(改),DEL(删)
+    int fd,  //要监听的FD的编号
+    struct epoll_event *event   //要监听的事件类型：读，写，异常等
+);
+
+int epoll_wait(  //检查rdlist列表是否为空，不为空则返回就绪的FD数量
+    int epfd,   //epoll实例的句柄，定位要查找的eventpoll
+   	struct epoll_event *events,   //空event数组，用于接收就绪的FD，在用户空间创建
+    int maxevents,  //events数组的最大长度
+    int timeout    //超时事件，-1不超时；0不阻塞；大于0为相应的阻塞时间
+);
+```
+
+整个epoll的流程可以概括为三个函数的调用：
+
+<img src="Redis部分.assets/image-20220830142149359.png" alt="image-20220830142149359" style="zoom:80%;" />
+
+相比于select和poll模式，epoll模式解决了三个问题：
+
++ epoll基于红黑树保存要监听的FD，理论上没有监听的上限，而且增删改查的效率都非常高，性能不会随着监听FD数量的增加而下降
++ 每个FD只需要执行一次epoll_ctl添加到红黑树，以后每次epoll_wait无需传递任何参数，无需重复拷贝FD到内核空间
++ 内核会将就绪的FD直接拷贝到用户空间的指定位置，用户进程不需要遍历所有要监听的FD就知道已经就绪的FD是哪个
+
+一个基于epoll模式的web服务器的处理流程：
+
++ 第一步，在服务器启动的时候调用epoll_create创建eventpoll实例
++ 第二步创建服务端socket，也就是ServerSocket并得到它的fd
++ 第三步调用epoll_ctl向rb_root中添加一个监听serverSocket的fd
++ 第四步调用epoll_wait函数等待fd就绪，一般来说，web服务端的socket监听的事件就客户端的连接事件
++ 第五步用户空间中判断是否有就绪的FD，如果有则根据FD的事件类型去处理事件
+
+<img src="Redis部分.assets/image-20220830144320102.png" alt="image-20220830144320102" style="zoom:80%;" />
+
+
+
 （4）异步IO，也称AIO，在真个过程中都是非阻塞的，用户进程调用完异步API之后就可以去做其他事情，内核等待数据就绪并拷贝到用户空间后开启一个线程向用户进程递交信号，通知用户进程，特点就是有多个线程协调合作，并且整个过程非阻塞
 
 <img src="Redis部分.assets/image-20220826113137844.png" alt="image-20220826113137844" style="zoom:80%;" />
@@ -1429,7 +1479,40 @@ poll的流程是：
 
 ### BitMap
 
+BitMap常用于大数据量的统计工作，在Redis中利用string类型的数据结构实现BitMap，因此最大的上限是512M，转换为bit则是2^32个比特位
 
+BitMap的常用命令：
+
+```
+setbit key offset value  #向bitmap的第offset位设置值value，要不就是1要不就是0
+#示例：
+127.0.0.1:6379> setbit bit 0 1
+127.0.0.1:6379> setbit bit 1 1
+127.0.0.1:6379> setbit bit 2 1
+127.0.0.1:6379> setbit bit 5 1
+127.0.0.1:6379> setbit bit 6 1
+#完成上面的命令之后，bit的值就是 1110011
+
+getbit key offset  #获取指定offset上的值
+#示例：
+127.0.0.1:6379> getbit bit 2
+(integer) 1
+127.0.0.1:6379> getbit bit 4
+(integer) 0
+
+bitcount key  #统计key中值为1的bit位的数量
+#示例：
+127.0.0.1:6379> bitcount bit
+(integer) 5
+
+bitfield key  #操作bitMap中bit数组中的指定位置的值，这个命令比较复杂
+#示例：bit = 1110011，get u2 0 也就是取前两位 11 转换为十进制就是3
+127.0.0.1:6379> bitfield bit get u2 0
+1) (integer) 3
+
+```
+
+bitmap的用处就是网站的签到功能，也可以统计该用户在一个月内的签到天数
 
 ### HyperLogLog
 
