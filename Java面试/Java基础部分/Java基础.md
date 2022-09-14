@@ -448,6 +448,22 @@ if ((p = tab[i = (n - 1) & hash]) == null)
   }
   ```
 
+### 1.5 总结 -- Java集合框架
+
+<img src="Java基础.assets/image-20220909145630263.png" alt="image-20220909145630263" style="zoom:80%;" />
+
+
+
+
+
+Java的集合框架主要是由两大接口衍生出来的：
+
++ `Collection`接口：存放相同类型的单一元素
+  + `List`接口：有序、可重复，相当于数组
+  + `Queue`接口：有一个衍生接口`Deque`双端队列，先进先出的队列
+  + `Set`接口：无序、不重复，相当于数学概念中的集合
++ `Map`接口：存放key-value键值对
+
 ## 二、单例模式
 
 ### 2.1 实现方式1 -- 饿汉式
@@ -707,3 +723,45 @@ public static Runtime getRuntime() {
 
 private Runtime() {}
 ```
+
+## 三、工厂模式
+
+### 3.1 简单工厂
+
+工厂模式主要是用于对实现逻辑的封装，并且通过对公共的接口提供对象的实例化服务，在之后添加新的类时不需要大动干戈，只需要修改一点点就好
+
+简单工厂的几种实现方式：
+
+**（1）静态工厂**
+
+以创建商品实例为例：
+
+```java
+public class SimpleFactory {
+    public static Share createProduct(EnumProductType type) {
+        if(EnumProductType.activityOne.equals(type)) {
+            return new ProcuctOne();
+        } else if(EnumProductType.activityTwo.equals(type)) {
+            return new ProductTwo();
+        }
+        return null
+    }
+    
+    public enum EnumProductType {
+        activityOne, activityTwo;
+    }
+}
+
+```
+
+这是一种最简单的工厂模式，可以根据传入商品类型的不同，生成不同商品的实例，但是之后如果需要删除或者增加商品的类型，就需要去修改`createProduct`方法，增加`if-else`或者删除`if-else`，有较强的代码侵入
+
+**（2）反射方式的静态工厂**
+
+为解决普通静态工厂存在的问题，可以使用反射的方式，获取商品的类型并创建实例，但这样影响程序执行的效率
+
+
+
+### 3.2 工厂方法
+
+工厂方法是对简单工厂的一种改进
