@@ -1475,6 +1475,29 @@ int epoll_wait(  //检查rdlist列表是否为空，不为空则返回就绪的F
 
 <img src="Redis部分.assets/image-20220826113137844.png" alt="image-20220826113137844" style="zoom:80%;" />
 
+### RESP协议
+
+Redis是一个CS架构的软件，通信一般分为两步：
+
++ 客户端向服务器发送一条命令
++ 服务端解析并执行命令，返回响应给客户端
+
+因此客户端发送命令的格式、服务端响应结果的格式必须有一个规范，这个规范就是通信协议，Redis中采用的就是RESP（Redis Serialization Protocol）协议
+
++ Redis1.2版本引入了RESP协议
++ Redis2.0版本中成为与Redis服务端通信的标准，称为RESP2
++ Redis6.0版本中，从RESP2升级到了RESP3协议，增加了更多数据类型并支持6.0的新特性 -- 客户端缓存
+
+RESP的数据类型：
+
++ 单行字符串：首字节以`'+'`开头，后面跟上单行字符串，以`"\r\n"`结尾，例如返回"OK"：`+OK\r\n`，一般用作服务器向客户端返回结果
++ 错误：首字节以`'-'`开头，与单行字符串格式一致，字符串的内容是异常的具体信息：`-Errors message\r\n`
++ 数值：首字节以`':'`开头，后面跟上数字格式的字符串，也以`"\r\n"`结尾：`:10\r\n`
++ 多行字符串：首字节以`'$'`开头，紧跟着字符串的长度，最大支持512MB：`$5\r\nhello\r\n`，从第一个"\r\n"之后读5个字节长度的字符串
+  + 如果$后跟着的是0表示一个空字符串
+  + 如果$后跟着的是-1表示这个字符串不存在
++ 数组：首字节以`'*'`，后面跟上数组元素个数，再跟上元素，元素数据类型不限：`*3\r\n$3\r\nset\r\n$4\r\nname\r\n$2\r\nzz\r\n`，通常用于客户端向服务器发送的命令
+
 ## 附录 Redis新增的三种数据结构
 
 ### BitMap
@@ -1698,3 +1721,61 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
 ### 内存淘汰策略
 
+内存淘汰就是当Redis内存使用达到设置的阈值时，Redis主动挑选部分key删除以释放更多内存的流程，Redis会在处理客户端命令的方法`processCommand()`中尝试做内存淘汰，大致的代码：
+
+其中，内存淘汰需要解决的两个问题：
+
++ Redis如何知道内存不够了：Redis会在每次执行客户端命令前去检查内存是否足够
++ 如果内存不够了，Redis应该挑选哪些key进行删除：在淘汰key的函数中`performEvictions()`会有几种策略
+
+```c
+int processCommand(client *c) {
+    //如果服务器设置了server.maxmeory属性，并且当前没有执行lua脚本
+    if(server.maxmeory && !server.lua_timeout) {
+        //尝试进行内存淘汰 --> performEvictions
+        int out_of_memory = (performEvictions() == EVIVT_FAIL);
+        //...
+        if(out_of_memory && reject_cmd_on_oom) {
+            rejectCommand(c, shared.oomerr);   //拒绝执行当前命令，并且报oom错误
+            return C_OK;
+        }
+    }
+}
+```
+
+内存淘汰的策略：包含在`performEvictions()`中，总共有八种策略
+
++ `noeviction`：不淘汰任何key，所以在内存打满时不允许写入新的数据，默认就是这种策略
++ `volatile-ttl`：对设置了TTL的key，比较key的剩余TTL，TTL越小越先被淘汰（快过期的先淘汰）
++ `allkeys-random`：对全体key，随机进行淘汰，直接从`db->dict`表中随机删除
++ `volatile-random`：对设置了TTL的key，随机进行淘汰，也就是从`db->expires `中随机挑选
++ `allkeys-lru`：对全体key，基于LRU算法进行淘汰
++ `volatile-lru`：对设置了TTL的key，基于LRU算法进行淘汰
++ `allkeys-lfu`：对全体key，基于LFU算法进行淘汰
++ `volatile-lfu`：对设置了TTL的key，基于LFU算法进行淘汰
+
+LRU算法：最近最久未使用，用当前时间减去上一次访问到这个key的时间，这个值越大则淘汰优先级越高
+
+LFU算法：最小频率淘汰，统计每个key的访问频率，值越小淘汰优先级越高
+
+实现方式：Redis的数据都会被封装为RedisObject结构：
+
+```c
+typedef struct redisObject {
+    unsigned type:4;   //对象类型 string，list，set等等
+    unsigned encoding:4;  //编码方式
+    unsigned lru:LRU_BITS;   //内存淘汰的方式：
+    //LRU：以秒为单位记录最近一次的访问时间，24bit
+    //LFU：高16位以分钟为单位记录最近一次访问时间，低8位记录逻辑访问次数
+    
+    int refcount;    //引用计数，计数为0可回收
+    void *ptr;    //数据指针，指向真实数据
+} robj;
+```
+
+> LFU记录的访问次数是**逻辑访问次数**，因为并不是每次key被访问都需要计数，因为记录的位数只有8位，最多只能计255次，高并发情况下热点key会被访问成千上万次，不可能每次都记录，所以采用一个逻辑访问次数的方式：记录次数的算法
+>
+> + 生成一个0 - 1之间的随机数R
+> + 计算 1 / (旧次数 * lru_log_factor + 1)，记录为P，lru_log_factor默认为10，所以如果访问地越频繁，后期计数的频率会越低
+> + 如果R < P，则计数器 + 1，最大不超过255，当key被频繁访问时，P会变得很小，因为旧访问数会很大，计数器 + 1的概率就会变得很小
+> + 访问次数会随着时间衰减，距离上一次访问时间每隔lru_decay_time分钟（默认是1min），计数器就会减1
