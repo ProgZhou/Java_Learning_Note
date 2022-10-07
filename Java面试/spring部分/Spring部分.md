@@ -1682,3 +1682,219 @@ public class Proxy extends Target{
     }
 }
 ```
+
+
+
+## 附录8 Spring IOC & AOP总结
+
+### IOC
+
+`IOC`就是控制反转（`inverse of control`），是一种设计思想，将原本在程序中手动创建对象的控制权交给spring框架来管理
+
+`IOC`有两层意思：
+
++ 控制：指的是对象创建（实例化，管理）的权力
++ 反转：将对象的控制权交给外部（Spring框架）管理
+
+具体来说是将对象间的相互依赖关系交给IOC容器来管理，并由IOC容器来完成对象的注入工作，这样做的目的就是简化开发，减少各个模块之间的耦合
+
+```java
+public class PeopleService {
+    //如果没有使用IOC容器的话，程序中就需要自己new对象，如果后续要进行功能的扩展，需要在这里修改实例化的对象
+    private PeopleMapper peopleMapper = new PeopleMapperImpl();  //new PeopleMapperImpl1()  new PeopleMapperImpl2()  ...
+}
+
+public interface PeopleMapper {}
+
+public class PeopleMapperImpl implements PeopleMapper {}
+
+////////////////////////////////////////////////////////////////////////////////
+//如果有了IOC容器的话，就不需要在程序中显示地new对象
+public class PeopleService {
+    @Autowired   //只需要加上注解标注，spring会从ioc容器中根据参数的类型或者名称从容器中获取对应的对象注入
+    private PeopleMapper peopleMapper;
+}
+```
+
+所以总得来说，`IOC`解决了两个问题：
+
++ 对象之间的耦合度、依赖程度降低
++ 资源管理变得很容易
+
+从控制反转会引出另一个名词：依赖注入（`dependency injection`），是spring中IOC容器的一种实现方式
+
+### AOP
+
+`AOP`就是面向切面编程（`Aspect oriented programming `），是一种编程思想，能够将那些与业务无关，但是多个业务之间需要共同调用的代码（例如事务管理，日志管理，权限管理等等）封装起来，便于减少系统的重复代码，降低模块之间的耦合度
+
+通过`AOP`的描述，能够发现它解决了两个问题：
+
++ 代码重复问题
++ 业务逻辑与其他功能代码混合在一起，代码臃肿的问题
+
+简单地说`AOP`就是：在不改变原有业务逻辑的情况下，向业务代码中注入其他功能
+
+Spring中实现`AOP`有几种方案：
+
++ AspectJ，Spring AOP集成了AspectJ，可以使用其中的AOP代理的功能
++ Spring JDK动态代理，处理接口的代理
++ Spring Cglib动态代理，处理类与类之间的代理
+
+> Spring常用的是后面两种，与AspectJ的区别就是：
+>
+> + jdk和cglib动态代理都是运行时增强，用到了反射
+> + aspectJ代理是编译时增强，直接修改了文件的字节码
+
+
+
+## 附录9 Spring / Springboot的常用注解
+
+### @SpringBootApplication
+
+项目创建之后，这个注解会默认加在启动类上，这是整个Springboot项目的基石
+
+```java
+@SpringBootApplication
+public class StudentManageApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(StudentManageApplication.class, args);
+    }
+}
+```
+
+`@SpringBootApplication` = `@ComponentScan` + `@SpringBootConfiguration` + `@EnableAutoConfiguration`
+
++ `@ComponentScan`：包扫描注解，指定扫描规则
++ `@SpringBootConfiguration`：其实就是一个`@Configuration`注解，表示这个启动类是一个配置类
++ `@EnableAutoConfiguration`：这个注解又是由两个注解组成，分别是：
+  + `@AutoConfigurationPackage`：实际上是一个`@Import(AutoConfigurationPackage.Register.class)`注解，指定了默认的包扫描路径，也就是启动类所在的包
+  + `@Import(AutoConfigurationImportSelector.class)`：向项目中导入一系列的开发场景，也就是相应的配置类`xxxAutoConfiguration`，总共有127个左右，根据版本的不同有所变动，这些配置类再配合一些条件注解`@Conditionxxx`，使一些场景生效
+
+这个注解其实也解释了Springboot的自动装配原理
+
+### Spring bean相关的注解
+
++ `@Autowired`：管理依赖注入的注解，可以加在属性上，默认按照类型注入，这是Spring框架提供的一个注解
++ `@Component`、`@Repository`、`@Service`、`@Controller`：将某个类标识为Spring组件，生成一个JavaBean放到IOC容器中，由Spring进行管理，不同的注解标识不同的应用层，其中`@Component`是通用的
++ `@Scope`：标识Bean的作用域，常标注在方法上（配置类中向容器中加入Bean的方法）
++ `@Configuration`：声明配置类
+
+## 附录10 Spring事务相关总结
+
+### Spring对事务的支持
+
+Spring框架对事务的支持取决于使用的数据库是否支持事务，比如MySQL数据库，如果使用的是innodb存储引擎，那么就是支持事务的；如果使用的是myisam存储引擎，那么就不支持事务了
+
+Spring支持两种方式的事务管理：
+
++ 编程式事务：通过`TransactionTemplate`和`TransactionManager`手动管理事务，实际应用中很少使用，比如使用`TransactionManager`管理事务
+
+  ```java
+  @Autowired
+  private PlatformTransactionManager transactionManager;
+  
+  public void testTransaction() {
+  
+    TransactionStatus status = transactionManager.getTransaction(new DefaultTransactionDefinition());
+            try {
+                 // ....  业务代码
+                transactionManager.commit(status);
+            } catch (Exception e) {
+                transactionManager.rollback(status);
+            }
+  }
+  ```
+
++ 声明式事务：通过AOP的功能实现，比如`@Transaction`注解，代码的侵入性较小
+
+  ```java
+  public class PeopleServiceImpl implements PeopleService {
+      @Transactional(propagation=propagation.PROPAGATION_REQUIRED)
+      public void method() {
+          //业务代码
+      }
+  }
+  ```
+
+### Spring事务管理器
+
+Spring并不直接管理事务，而是提供了多种事务管理器：
+
++ `PlatformTransactionManager`（平台）事务管理接口，Spring事务管理的核心，通过这个接口，Spring为各个平台，比如JDBC，JPA等都提供了对应的事务管理器
++ `TransactionDefinition`事务定义信息（事务隔离级别、传播行为、超时回滚等），这个类定义了一些事务的基本属性：
+  + 隔离级别
+  + 传播行为
+  + 回滚规则
+  + 是否只读
+  + 事务超时
++ `TransactionStatus`事务状态，用来记录事务的状态
+
+### Spring事务传播行为
+
+事务传播行为是为了解决业务层**方法之间**互相调用的事务问题，当某个事务方法被另一个事务方法调用时，必须指定事务应该如何传播，比如：
+
+```java
+public class A {
+    @Autowired
+    private B b;
+    
+    @Transaction
+    public void aMethod() {
+        //业务代码...
+        b.bMethod();
+        //业务代码...
+    }
+}
+
+public class B {
+    @Transaction
+    public void bMethod() {
+        
+    }
+}
+```
+
+在上面的例子中，A类的`aMethod()`方法调用了B类中的`bMethod()`方法，这个时候就涉及到了两个事务方法之间调用，如果`bMethod()`方法出现异常回滚，如果配置事务传播行为让`aMethod()`跟着回滚，就是事务传播行为要解决的问题
+
+在`TransactionDefinition`定义中包括了如下几个表示传播行为的常量：
+
+```java
+public interface TransactionDefinition {
+    int PROPAGATION_REQUIRED = 0;
+    int PROPAGATION_SUPPORTS = 1;
+    int PROPAGATION_MANDATORY = 2;
+    int PROPAGATION_REQUIRES_NEW = 3;
+    int PROPAGATION_NOT_SUPPORTED = 4;
+    int PROPAGATION_NEVER = 5;
+    int PROPAGATION_NESTED = 6;
+    ......
+}
+```
+
+Spring也有一个枚举类去定义这些常量，就是`Propagation`，常用的事务传播行为有这两种：
+
++ `TransactionDefinition.PROPAGATION_REQUIRED`：这是使用最多的一种事务传播行为，平常使用的`@Transaction`注解默认的就是这个传播行为，按照官方的说法，意思是如果当前方法存在事务，则加入该事务；如果当前方法没有事务，则新建一个事务，也就是说：
+  + 如果外部方法没有开启事务的话，`Propagation.REQUIRED`修饰的内部方法会新开启自己的事务，且开启的事务相互独立，互不干扰。
+  + 如果外部方法开启事务并且是`Propagation.REQUIRED`的话，所有`Propagation.REQUIRED`修饰的内部方法和外部方法均属于同一事务 ，只要一个方法回滚，整个事务均回滚。
+  + 以上面的例子说明，如果`aMethod()`和`bMethod()`使用的都是`PROPAGATION_REQUIRED`传播行为的话，两者使用的就是同一个事务，只要其中一个方法回滚，整个事务均回滚。
++ `TransactionDefinition.PROPAGATION_REQUIRES_NEW`：不管怎么样，新建一个事务，如果当前方法存在事务，则把事务挂起，也就是说不管外部方法是否开启事务，`Propagation.REQUIRES_NEW`修饰的内部方法会新开启自己的事务，且开启的事务相互独立，互不干扰
+  + 以上面的例子说明，如果`bMethod()`使用`Propagation.REQUIRES_NEW`修饰的话，会开启一个独立的事务，也就是说，如果`aMethod()`出现异常回滚了，`bMethod()`不会跟着回滚，因为`bMethod()`开启了一个新事务，并且与`aMethod()`的事务相互独立
+
+> 提到事务就需要关注事务的隔离级别，Spring给事务规定了五个隔离级别，定义在`TransactionDefinition`中，分别是（其实就比SQL的隔离级别多了一个默认的隔离级别）：
+>
+> - **`TransactionDefinition.ISOLATION_DEFAULT`** :使用后端数据库默认的隔离级别，MySQL 默认采用的 `REPEATABLE_READ` 隔离级别 Oracle 默认采用的 `READ_COMMITTED` 隔离级别.
+> - **`TransactionDefinition.ISOLATION_READ_UNCOMMITTED`** :最低的隔离级别，使用这个隔离级别很少，因为它允许读取尚未提交的数据变更，**可能会导致脏读、幻读或不可重复读**
+> - **`TransactionDefinition.ISOLATION_READ_COMMITTED`** : 允许读取并发事务已经提交的数据，**可以阻止脏读，但是幻读或不可重复读仍有可能发生**
+> - **`TransactionDefinition.ISOLATION_REPEATABLE_READ`** : 对同一字段的多次读取结果都是一致的，除非数据是被本身事务自己所修改，**可以阻止脏读和不可重复读，但幻读仍有可能发生。**
+> - **`TransactionDefinition.ISOLATION_SERIALIZABLE`** : 最高的隔离级别，完全服从 ACID 的隔离级别。所有的事务依次逐个执行，这样事务之间就完全不可能产生干扰，也就是说，**该级别可以防止脏读、不可重复读以及幻读**。但是这将严重影响程序的性能。通常情况下也不会用到该级别。
+
+### @Transaction注解
+
+`@Transaction`注解可以标注在方法（必须在public方法上才会生效）、类、接口上
+
+`@Transaction`注解的工作机制由AOP实现，也就是动态代理，如果目标对象实现了接口，则会采用jdk动态代理；如果目标对象没有实现接口，则会使用cglib动态代理
+
+存在的问题：若同一类中的其他没有 `@Transactional` 注解的方法内部调用有 `@Transactional` 注解的方法，有`@Transactional` 注解的方法的事务会失效。这是由AOP自己造成的，在调用事务方法时，由于使用了动态代理，实际上调用的是`TransactionInterceptor` 类中的 `invoke()`方法，如果本类中直接调用事务方法就是`this.xxxMethod()`，并不会使事务生效
+
+
+
