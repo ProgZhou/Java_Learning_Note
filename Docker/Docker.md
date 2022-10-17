@@ -172,7 +172,7 @@ hello-world   latest    feb5d9fea6a5   12 months ago   13.3kB
 
 > 同一个仓库员可以有多个`TAG`版本，代表这个仓库源的不同版本，比如有MySQL的仓库，可以同时有5.7和8.0.26的版本
 >
-> 在定义的时候使用`REPOSITORY:TAG`来定义不同的镜像，默认使用最新版本的镜像
+> 在定义的时候使用`REPOSITORY:TAG`来定义不同的镜像，默认使用最新版本的镜像（latest）
 
 常用参数：
 
@@ -249,7 +249,7 @@ Deleted: sha256:feb5d9fea6a5e9606aa995e879d862b825965ba48de054caab5ef356dc6b3412
 
 + 删除单个镜像：`docker rmi 镜像ID`
 + 删除多个镜像：`docker rmi 镜像名1:TAG 镜像名2:TAG`
-+ 删除全部镜像：`docker rmi $(docker images -qa)`
++ 删除全部镜像（慎用）：`docker rmi $(docker images -qa)`
 
 常用参数：
 
@@ -288,7 +288,7 @@ root          10       1  0 00:36 pts/0    00:00:00 ps -ef
 root@0e66022be853:/# 
 ```
 
-（2）`docker ps`查看docker上运行的所有容器实例
+（2）`docker ps`查看docker上运行的所有正在运行的容器实例
 
 ```
 [root@ ~]# docker ps
@@ -481,4 +481,359 @@ systemd+            26421               26400               0                   
   a.txt
   ```
 
-  
+
+### 2.3 Docker镜像
+
+docker中的**镜像**是一种**轻量级、可执行的独立软件包**，它包含运行某个软件所需的所有内容，将应用程序和配置依赖打包好形成一个可交付的运行环境（包括代码，运行时需要的程序库，环境变量和配置文件等），这个打包好的运行环境就是image镜像文件，只有通过这个镜像文件才能生成docker容器实例
+
+#### 2.3.1 联合文件系统
+
+联合文件系统（`UnionFS`）：联合文件系统是一种分层、轻量级并且高性能的文件系统，它支持将对文件系统的修改作为一次提交来一层层地叠加，同时可以将不同目录挂载到同一个虚拟文件系统下，以拉取tomcat镜像为例
+
+可以看到，在拉取tomcat镜像的时候，拉取了其他镜像，比如0e29546d541c，cb5b7ae36172等等，说明，tomcat结合了其他文件镜像，来实现一整个tomcat系统的功能
+
+```
+[root@ ~]# docker pull tomcat
+Using default tag: latest
+latest: Pulling from library/tomcat
+0e29546d541c: Pull complete 
+9b829c73b52b: Pull complete 
+cb5b7ae36172: Pull complete 
+6494e4811622: Pull complete 
+668f6fcc5fa5: Pull complete 
+dc120c3e0290: Pull complete 
+8f7c0eebb7b1: Pull complete 
+77b694f83996: Pull complete 
+0f611256ec3a: Pull complete 
+4f25def12f23: Pull complete 
+```
+
+Union文件系统是docker镜像的基础，镜像可以通过分层来进行继承，基于基础镜像可以制作各种具体的应用镜像
+
+联合文件系统的特性就是一次同时会加载多个文件系统，但从结果来看，只能看到一个文件系统，联合加载会把各层文件系统叠加起来，这样最终的文件系统会包含所有底层的文件和目录
+
+
+
+#### 2.3.2 Docker镜像加载原理
+
+docker的镜像实际上由一层一层的文件系统组成
+
+docker镜像的最底层是引导文件系统bootfs（主要包含bootloader和kernel，bootloader主要是引导加载kernel），这一层与典型的linux系统是一样的，包含boot加载器和内核，当boot加载完成之后整个内核就都在内存中了，此时内存的使用权已由bootfs转交给内核
+
+rootfs在bootfs之上，包含的就是典型linux系统中的/dev，/proc等标准目录和文件，rootfs就是不同操作系统发行版，比如ubuntu，centos等
+
+<img src="Docker.assets/image-20221015091634737.png" alt="image-20221015091634737" style="zoom:80%;" />
+
+对于一个精简的OS，rootfs可以很小，只需要包括最基本的命令、工具和程序库就可以了，因为底层直接用host和kernel，自己只需要提供rootfs就行了，对于不同的linux发行版本，bootfs基本是一致的，rootfs会有差别，因此不同的发行版可以公用bootfs
+
+
+
+> **为什么Docker要使用镜像分层**
+>
+> 镜像分层最大的一个好处就是共享资源，方便复制迁移，就是为了复用
+>
+> 比如有多个镜像都需要使用一个相同的功能，那么docker host只需要在磁盘上保存一份base镜像，同时内存中也只需要加载一份base镜像，就可以为所有容器服务了，而且镜像的每一层都可以被共享
+>
+> 有点类似于Java中的继承，父类提供后续子类共有的功能，子类只需要继承父类，之后再做一些属于自己的扩展即可
+
+#### 2.3.3 Docker commit操作
+
+`docker commit`提交容器副本使之称为一个新的镜像
+
+示例：在最基本的ubuntu镜像中，添加vim命令，并提交成一个新镜像
+
+```
+####首先需要运行最基本的一个ubuntu镜像
+[root@ ~]# docker run -it ubuntu /bin/bash
+root@c13e21caa045:/# ls
+bin  boot  dev  etc  home  lib  lib32  lib64  libx32  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
+root@c13e21caa045:/# touch a.txt
+####最基本的ubuntu镜像并不支持vim命令
+root@c13e21caa045:/# vim a.txt
+bash: vim: command not found
+
+####在当前容器中，为ubuntu添加vim命令
+root@c13e21caa045:/# apt-get update
+Get:1 http://archive.ubuntu.com/ubuntu focal InRelease [265 kB]          
+Get:2 http://security.ubuntu.com/ubuntu focal-security InRelease [114 kB]            
+Get:3 http://archive.ubuntu.com/ubuntu focal-updates InRelease [114 kB]
+Get:4 http://archive.ubuntu.com/ubuntu focal-backports InRelease [108 kB]
+......
+
+root@c13e21caa045:/# apt-get -y install vim
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+......
+
+####经过上述操作之后，当前容器已经支持vim命令了，然后，通过docker commit命令将这个镜像提交
+[root@ ~]# docker commit -m="vim add successfully" -a="progZhou" c13e21caa045 test/ubuntu:1.1
+sha256:306750a9136ee3f99d560a3216d4ad73fc8661d96badccd13402165c81a5654c
+####查看刚刚提交的镜像
+[root@ ~]# docker images
+REPOSITORY    TAG       IMAGE ID       CREATED         SIZE
+test/ubuntu   1.1       306750a9136e   3 minutes ago   180MB
+tomcat        latest    fb5657adc892   9 months ago    680MB
+ubuntu        latest    ba6acccedd29   12 months ago   72.8MB
+redis         6.0.8     16ecd2772934   23 months ago   104MB
+```
+
+docker commit的完整命令：
+
++ `docker commit -m="描述信息" -a="作者ID" 容器ID 镜像名称:版本号`
+
+Docker中的镜像分层，支持通过扩展现有镜像，创建新的镜像，类似Java继承于一个base基础类，自己在按需扩展
+
+新镜像是从base镜像一层一层叠加生成的，每安装一个软件，就在现有镜像的基础上增加一层
+
+<img src="Docker.assets/image-20221015094936804.png" alt="image-20221015094936804" style="zoom:80%;" />
+
+#### 2.3.4 本地镜像推送到阿里云
+
+使用`docker commit`命令提交的镜像文件只存储在本机中，如果想要共享出去，就可以使用阿里云的镜像仓库
+
+打开阿里云网页 -> 控制台 -> 容器镜像服务 -> 创建个人 / 企业实例
+
+<img src="Docker.assets/image-20221016090852297.png" alt="image-20221016090852297" style="zoom:80%;" />
+
+个人实例创建完成之后，首先创建命名空间，再创建镜像仓库
+
+<img src="Docker.assets/image-20221016091612877.png" alt="image-20221016091612877" style="zoom:80%;" />
+
+然后根据操作指南输入相应的命令，主要是**3. 将镜像推送到Registry**，前两步是从阿里云镜像仓库中拉取
+
+<img src="Docker.assets/image-20221016091715779.png" alt="image-20221016091715779" style="zoom:80%;" />
+
+
+
+案例：将之前带有vim功能的ubuntu镜像推送到阿里云仓库
+
+```
+####首先登录到阿里云账户
+[root@ ~]# docker login --username=**** registry.cn-wulanchabu.aliyuncs.com
+Password: 
+WARNING! Your password will be stored unencrypted in /root/.docker/config.json.
+Configure a credential helper to remove this warning. See
+https://docs.docker.com/engine/reference/commandline/login/#credentials-store
+
+Login Succeeded
+####将想要推送的镜像推送出去
+[root@ ~]# docker tag 306750a9136e registry.cn-wulanchabu.aliyuncs.com/test-respository/ubuntu-vim:1.1
+[root@ ~]# docker push registry.cn-wulanchabu.aliyuncs.com/test-respository/ubuntu-vim:1.1
+The push refers to repository [registry.cn-wulanchabu.aliyuncs.com/test-respository/ubuntu-vim]
+7bb12b8eda27: Pushed 
+9f54eef41275: Pushed 
+1.1: digest: sha256:bb57314b8b035b8daa2a9a598217325f4fb757665744b0c6aeb7fd8563c34a0c size: 741
+```
+
+### 2.4 Docker容器数据卷
+
+docker容器数据卷简单来说就是一种持久化的方式，就像平常用的笔记本电脑，如果有一些比较重要的数据，一般就会将这些数据保存到一个外置硬盘或者保存到云盘里去
+
+类似的，docker容器在运行的过程中也会产生一些重要的数据，所以，docker采用容器数据卷的方式完成数据的持久化
+
+<img src="Docker.assets/image-20221016094641243.png" alt="image-20221016094641243" style="zoom:80%;" />
+
+**Docker容器数据卷是什么**
+
+卷就是目录或者文件，存在于一个或多个容器中，由docker挂载到容器，但不属于联合文件系统，因此能够绕过联合文件系统，提供一些用于持续存储或共享数据的特性
+
+卷的设计目的就是数据持久化，完全独立于容器的生存周期，因此docker不会在容器删除时删除其挂载的数据卷
+
+> 这个容器数据卷有点类似于redis中的rdb和aof文件，就是将docker容器内的数据保存到本机的磁盘上，在容器启动的时候再从磁盘中把这些数据读到容器内运行
+
+**Docker容器卷命令**
+
+`docker run -it --privileged=true -v /本机绝对路径目录:/容器内目录 镜像名`
+
+```
+[root@ docker]# docker run -it --privileged=true -v /usr/local/docker/host_data:/tmp/docker_data --name=u1 306750a9136e
+root@3100803e2ef4:/# cd tmp
+root@3100803e2ef4:/tmp# ls
+docker_data
+root@3100803e2ef4:/tmp# cd docker_data
+root@3100803e2ef4:/tmp/docker_data# ls
+####在容器内创建docker_data.txt文件，查看主机下是否同步创建了这个文件
+root@3100803e2ef4:/tmp/docker_data# touch docker_data.txt
+root@3100803e2ef4:/tmp/docker_data# ls
+docker_data.txt
+
+[root@ ~]# cd /usr/local/docker
+[root@ docker]# ls
+host_data
+[root@ docker]# cd host_data/
+####主机内确实同步创建了docker_data.txt
+[root@ host_data]# ls
+docker_data.txt
+[root@ host_data]# touch host_data.txt
+
+```
+
+> docker容器挂载到主机之后，数据的同步是双向的，也就是说在容器内的操作会同步到本机被挂载的目录中；同样的，在主机中目录的操作也会同步到容器内，即使容器宕机了，之后容器重启的时候，主机内的操作仍然会同步到容器内
+>
+> **为什么要加 --privileged=true参数**
+>
+> 在centos版本加强了安全控制之后，docker的容器目录挂载的操作会被判定为不安全操作，所以如果直接使用挂载命令，会出现`cannot open directory .: Permission denied`报错信息，解决办法就是在之后加一个`--privileged=true`参数
+
+**Docker容器数据卷的特点**
+
++ 数据卷可在容器之间共享或重用数据
++ 卷中的更改可以直接实时生效
++ 数据卷中的更改不会包含在镜像的更新中
++ 数据卷的生命周期一直持续到没有容器使用它为止
+
+> 容器数据卷可以限定读写权限，默认就是可读可写，当然也可以设置为只读的，也就是容器只能读取主机目录下的内容，而不能同步去写
+
+
+
+### 2.5 Docker上安装软件
+
+总体上在docker上安装软件的步骤：
+
++ 搜索镜像
++ 拉取镜像
++ 查看镜像
++ 启动镜像
++ 停止容器
++ 移除容器
+
+#### 2.5.1 安装tomcat
+
+根据上面的步骤，首先去镜像仓库中搜索镜像
+
+```
+#### 选择一个适合自己的拉取即可
+[root@ ~]# docker search tomcat
+NAME                                  DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+tomcat                                Apache Tomcat is an open source implementati…   3399      [OK]       
+tomee                                 Apache TomEE is an all-Apache Java EE certif…   98        [OK]       
+bitnami/tomcat                        Bitnami Tomcat Docker Image                     47                   [OK]
+
+#### 使用命令拉取镜像
+[root@ ~]# docker pull tomcat
+
+#### 查看拉取的镜像
+[root@ ~]# docker images
+REPOSITORY                                                        TAG       IMAGE ID       CREATED         SIZE
+tomcat                                                            latest    fb5657adc892   9 months ago    680MB
+
+#### 启动容器运行tomcat镜像，并指定端口映射  -p 8080:8080来指定本机到容器的端口映射
+[root@ ~]# docker run -d -p 8080:8080 --name t1 tomcat
+22f7978d2e10311b44df16540034922293b42f7465053552a5c31ede7118e2ac
+[root@ ~]# docker ps
+CONTAINER ID   IMAGE     COMMAND             CREATED         STATUS         PORTS                                       NAMES
+22f7978d2e10   tomcat    "catalina.sh run"   3 seconds ago   Up 2 seconds   0.0.0.0:8080->8080/tcp, :::8080->8080/tcp   t1
+
+#### 通过浏览器访问tomcat首页，如果访问成功，则说明启动成功
+#### 如果需要正常启动还需要进行一些修改操作，这是最新版tomcat需要做的修改
+[root@iZ0jlh6etolgnm8tzsg4rxZ ~]# docker exec -it 22f7978d2e10 /bin/bash
+root@22f7978d2e10:/usr/local/tomcat# rm -r webapps
+root@22f7978d2e10:/usr/local/tomcat# mv webapps.dist webapps
+
+```
+
+#### 2.5.2 安装mysql
+
+仍然是几个步骤
+
+```
+#### 先搜索mysql的镜像
+[root@ ~]# docker search mysql
+NAME                            DESCRIPTION                                     STARS     OFFICIAL   AUTOMATED
+mysql                           MySQL is a widely used, open-source relation…   13234     [OK]       
+mariadb                         MariaDB Server is a high performing open sou…   5062      [OK]       
+phpmyadmin                      phpMyAdmin - A web interface for MySQL and M…   640       [OK]       
+percona                         Percona Server is a fork of the MySQL relati…   588       [OK]     
+
+#### 拉取mysql镜像，查看是否拉取成功
+[root@ ~]# docker pull mysql:8.0.26
+8.0.26: Pulling from library/mysql
+b380bbd43752: Pull complete 
+f23cbf2ecc5d: Pull complete 
+30cfc6c29c0a: Pull complete 
+......
+[root@ ~]# docker images
+REPOSITORY   TAG       IMAGE ID       CREATED         SIZE
+tomcat       latest    fb5657adc892   9 months ago    680MB
+ubuntu       latest    ba6acccedd29   12 months ago   72.8MB
+mysql        8.0.26    9da615fced53   12 months ago   514MB
+
+#### 运行mysql镜像，如果本机上已经有mysql启动着，就需要先关闭本机上的mysql，否则会有端口冲突，或者端口映射的时候换一个端口
+[root@ ~]# docker run -p 3306:3306 --name some-mysql -e MYSQL_ROOT_PASSWORD=docker123456 -d mysql:8.0.26
+7c9b91943d417ffa0545b7934189ec1abe7a20169329247c4c58842be9e589fd
+[root@ ~]# docker ps
+CONTAINER ID   IMAGE          COMMAND                  CREATED         STATUS         PORTS                                                  NAMES
+7c9b91943d41   mysql:8.0.26   "docker-entrypoint.s…"   2 seconds ago   Up 2 seconds   0.0.0.0:3306->3306/tcp, :::3306->3306/tcp, 33060/tcp   some-mysql
+
+#### 启动成功之后可以尝试进入mysql中进行一些简单地操作
+[root@ ~]# docker exec -it 7c9b91943d41 /bin/bash
+root@7c9b91943d41:/# mysql -uroot -p
+Enter password: 
+Welcome to the MySQL monitor.  Commands end with ; or \g.
+Your MySQL connection id is 8
+Server version: 8.0.26 MySQL Community Server - GPL
+
+Copyright (c) 2000, 2021, Oracle and/or its affiliates.
+
+Oracle is a registered trademark of Oracle Corporation and/or its
+affiliates. Other names may be trademarks of their respective
+owners.
+
+Type 'help;' or '\h' for help. Type '\c' to clear the current input statement.
+
+mysql> 
+```
+
+在虚拟机上完成操作之后，可以使用win10中的sqlyog进行连接
+
+<img src="Docker.assets/image-20221017092234120.png" alt="image-20221017092234120" style="zoom:80%;" />
+
+使用docker中的mysql需要有很多的注意事项：
+
++ 在外部使用mysql工具进行连接的时候，如果向表中插入中文，会有中文乱码报错
+
++ 需要对mysql的数据进行数据备份（容器数据卷）
+
+  在第一次运行mysql容器的时候，使用的是`docker run -p 3306:3306 --name some-mysql -e MYSQL_ROOT_PASSWORD=docker123456 -d mysql:8.0.26`，并没有指定容器数据卷，所以向这条命令中添加一些参数
+
+  ```
+  docker run -d -p 3306:3306 --privileged=true 
+  -v /usr/local/docker/mysql/log:/var/log/mysql   
+  -v /usr/local/docker/mysql/data:/var/lib/mysql  
+  -v /usr/local/docker/mysql/conf:/etc/mysql/conf.d   
+  --name some-mysql -e MYSQL_ROOT_PASSWORD=docker123456 mysql:8.0.26
+  ```
+
+  同时在主机对应的目录中，编写配置文件，确保在mysql容器启动的时候能够使用utf8字符集
+
+  ```
+  [client]
+  default_character_set=utf8
+  [mysqld]
+  collation_server=utf8_general_ci
+  character_set_server=utf8
+  ```
+
+> 这种方式既能够解决mysql中文字符乱码的问题，也能够解决容器删除数据无法恢复的问题，所以在安装这类数据存储类的软件时，**务必要加上docker的容器数据卷来进行数据的备份**
+
+#### 2.5.3 安装redis
+
+步骤跟之前的一样，在启动容器的时候也需要容器数据卷的映射
+
+```
+#### 首先，使用redis的话一定会修改它的配置文件，所以在本机的目录中需要粘贴一份干净的redis.conf，并作一定的修改
+[root@ redis]# cp redis.conf.copy /usr/local/docker/redis/redis.conf
+[root@ redis]# cd /usr/local/docker/redis
+[root@ redis]# ll
+total 92
+-rw-r--r-- 1 root root 93849 Oct 17 14:12 redis.conf
+
+#### 把/usr/local/docker/redis作为本机的数据卷与docker中的数据卷做映射
+docker run -p 6379:6379 --name some-redis --privileged=true 
+-v /usr/local/docker/redis/redis.conf:/etc/redis/redis.conf
+-v /usr/local/docker/redis/data:/data
+-d redis:6.2.4 redis-server /etc/redis/redis.conf  #读取配置文件，相当于本机下的redis-server xxx/redis.conf
+
+#### 最后可以修改本机中redis的配置文件来验证本机是否与docker中容器形成了映射
+```
+
