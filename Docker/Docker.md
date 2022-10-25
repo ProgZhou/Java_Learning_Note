@@ -114,7 +114,7 @@ image镜像文件可以看作是容器的模板，Docker根据image文件生成�
 
 <img src="Docker.assets/image-20221013084154957.png" alt="image-20221013084154957" style="zoom:80%;" />
 
-## 二、Docker操作
+## 二、Docker的基本操作
 
 ### 2.1 Docker的安装
 
@@ -837,3 +837,191 @@ docker run -p 6379:6379 --name some-redis --privileged=true
 #### 最后可以修改本机中redis的配置文件来验证本机是否与docker中容器形成了映射
 ```
 
+## 三、Docker高级篇
+
+### 3.1 Docker中软件的复杂安装
+
+#### 3.1.1 MySQL主从搭建
+
+在基础操作中，docker上安装的软件都是个体的，现如今大流量的前提下，集群配置是必不可少的，以mysql主从复制为例
+
+基本的步骤：
+
++ 先启动一个mysql容器作为主机，以3307为外部端口，启动命令：
+
+  ```
+  docker run -p 3307:3306 --name mysql-master --privileged=true \
+  -v /usr/local/docker/mysql/mysql-master/log:/var/log/mysql \    
+  -v /usr/local/docker/mysql/mysql-master/data:/var/lib/mysql \
+  -v /usr/local/docker/mysql/mysql-master/conf:/etc/mysql \
+  -v /usr/local/docker/mysql/mysql-master/mysql-files:/var/lib/mysql-files \  #这个挂载如果是mysql8.0版本一定要加上
+  -e MYSQL_ROOT_PASSWORD=123456 -d mysql:8.0.26
+  ```
+  
++ 在主机的映射目录conf下编写my.cnf配置文件
+
+  ```
+  [mysqld]
+  ## 设置server_id  同一局域网中唯一
+  server_id=101
+  ## 指定不需要同步的数据库名称
+  binlog-ignore-db=mysql
+  ## 开启二进制日志功能
+  log-bin=mall-mysql-bin
+  ## 设置二进制日志使用内存大小
+  binlog_cache_size=1M
+  ## 设置使用的二进制日志格式
+  binlog_format=mixed
+  ## 二进制日志过期清理时间，默认为0
+  expire_logs_days=7
+  ## 跳过主从复制中遇到的所有错误或指定类型的错误，避免slave端复制中断
+  slave_skip_errors=1062
+  ```
+
++ 重启mysql-master容器，使配置文件生效，之后进入mysql-master主机，创建相应的用户，并查看主机的状态
+
+  ```mysql
+  mysql> CREATE USER 'slave1'@'%' IDENTIFIED BY 'Root@123456';
+  mysql> GRANT REPLICATION SLAVE ON *.* TO 'slave1'@'%';  #授予slave用户主从复制的权限
+  mysql> ALTER USER 'slave1'@'%' IDENTIFIED WITH mysql_native_password BY 'Root@123456';  #在mysql8.0版本下必须执行这个语句
+  mysql> flush privileges;
+  
+  mysql> show master status;
+  +-----------------------+----------+--------------+------------------+-------------------+
+  | File                  | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
+  +-----------------------+----------+--------------+------------------+-------------------+
+  | mall-mysql-bin.000004 |     1142 |              | mysql            |                   |
+  +-----------------------+----------+--------------+------------------+-------------------+
+  ```
+
++ 使用同样的方式创建从机
+
+  ```
+  #配置文件：
+  [mysqld]
+  ## 设置server_id 同一局域网需要唯一
+  server_id=102
+  ## 指定不需要同步的数据库名称
+  binlog-ignore-db=mysql
+  ## 开启二进制日志功能，以slave作为其他数据库实例的master时使用
+  log-bin=mall-mysql-slave.bin
+  ## 设置二进制日志使用内存大小
+  binlog_cache_size=1M
+  ## 设置使用的二进制日志格式
+  binlog_format=mixed
+  ## 二进制日志过期清理时间
+  expire_logs_days=7
+  slave_skip_errors=1062
+  ## relay_log中配置中继日志
+  relay_log=mall-mysql-relay-bin
+  ## log_slave_updates表示slave将复制事件写进自己的二进制日志
+  log_slave_updates=1
+  ## slave设置为只读
+  read_only=1
+  
+  ##启动命令
+  docker run -p 3308:3306 --name mysql-slave --privileged=true \
+  -v /usr/local/docker/mysql/mysql-slave/log:/var/log/mysql \    
+  -v /usr/local/docker/mysql/mysql-slave/data:/var/lib/mysql \
+  -v /usr/local/docker/mysql/mysql-slave/conf:/etc/mysql \
+  -v /usr/local/docker/mysql/mysql-slave/mysql-files:/var/lib/mysql-files \  #这个挂载如果是mysql8.0版本一定要加上
+  -e MYSQL_ROOT_PASSWORD=123456 -d mysql:8.0.26
+  ```
+
++ 在从机中配置主从复制，登录到从机中，输入命令：
+
+  ```mysql
+  mysql> change master to master_host='172.17.0.2', master_user='slave', master_password='123456', master_log_file='mall-mysql-bin.000004', master_log_pos=1142;
+  
+  mysql> start slave;   ##开启主从同步
+  mysql> show slave status\G;
+  ##如果以下两项配置均为yes，即表示主从同步成功
+  Slave_IO_Running: Yes
+  Slave_SQL_Running: Yes
+  /*
+  说明：在docker中主机的ip可由命令docker inspect 查看
+  docker inspect --format='{{.NetworkSettings.IPAddress}}' mysql-master
+  172.17.0.2
+  master_log_file与master_log_pos需要与主机中查出来的结果一致
+  */
+  ```
+
+通过在主机中建库，建表插入数据来测试主从同步是否成功
+
+#### 3.1.2 Redis主从搭建
+
+
+
+
+
+### 3.2 分布式存储
+
+**问题提出：1 ~ 2亿条数据需要缓存，如何设计存储案例**
+
+这种大数据的存储，单机肯定是不可能的，所以需要使用集群式的分布式存储；以redis为例，现在的问题就是，如何将这些数据存储在多台redis中
+
+这就涉及数据分配的问题：一条数据是放在集群中的1号机还是2号机，如果放在2号机，之后怎么定位这条数据？
+
+#### 3.2.1 哈希取余分区
+
+最简单的方法就是参考hashmap的做法，假设现在是3台redis构成的集群：
+
+<img src="Docker.assets/image-20221025144845144.png" alt="image-20221025144845144" style="zoom:80%;" />
+
+2亿条数据就是2亿个<k, v>键值对，如果是在一开始便确定好集群数量的情况下，就可以通过`hash(key) % 3`来确定某条数据是存放在哪号机器上的，之后取数据时，也可以通过hash的方法确定数据在哪台机器上
+
++ 直接hash分区的方法的优点就是简单，直接有效，只需要提前确定好结点的数目，就能保证一段时间的数据支撑，整体起到负载均衡的作用
++ 但缺点也很明显，容灾和扩展能力不强，如果集群中有一台机器宕机，或者需要增加一台机器以应对更多的数据，由于集群中机器数目发生了变化，所有数据的映射关系就需要重新计算
+
+#### 3.2.2 一致性哈希算法
+
+一致性hash算法的设计目标就是为了解决分布式缓存数据变动和映射问题，当服务器个数发生变动时，尽量减少影响客户端到服务器的映射关系
+
+简单来讲，一致性hash有三大步骤：
+
++ 算法构建一致性哈希环
+
+  一致性哈希环：hash函数会计算目标的hash值，这个hash值必然有一个上限，可以根据一定的规则，将hash函数的值域固定在`[0, 2^32 - 1]`上，一致性hash算法仍然是用取模的方式，只是取模的基数变为2^32，将整个hash函数的值域在逻辑上形成一个圆环，起点是0，按照顺时针方向递增，直到2^32-1，最后一个数字的右边即是0，把由这2^32个数构成的圆环叫做一致性哈希环
+
+  <img src="Docker.assets/image-20221025151515646.png" alt="image-20221025151515646" style="zoom:80%;" />
+
++ 服务器ip结点映射：将集群中每台机器根据一定的规则映射到哈希环中的某一个位置
+
+  将各个服务器使用hash算法进行一个哈希计算，可以以服务器的ip或者主机名作为key，对2^32取模，这样就能确定某台服务器在环上的位置，比如有4台服务器，以服务器的ip为key做hash运算：
+
+  <img src="Docker.assets/image-20221025151944830.png" alt="image-20221025151944830" style="zoom:80%;" />
+
++ key落到服务器的落键规则
+
+  当需要存储或者访问某个数据时，首先需要计算出key的hash值，确定key在哈希环上的位置`hash(key) % 2^32`，从当前位置**沿着环顺时针行走，遇到的第一台服务器就是数据存储的服务器**，比如说有四份数据需要存储：A，B，C，D
+
+  <img src="Docker.assets/image-20221025152325065.png" alt="image-20221025152325065" style="zoom:80%;" />
+
+一致性哈市算法相对于直接使用hash分区多了些**容错性**和**扩展性**：
+
++ 如果有一台服务器宕机了，比如上例中的C服务器，那么影响的数据也仅仅是hash计算后落在BC之间的数据，因为如果后续数据仍然落在BC之间，数据会存储到D服务器，之后C恢复，可能就查不到这些数据，影响的数据量比较小，而不再是全局数据
++ 如果现在需要重新添加一台服务器，假设是E，结点落在CD之间，那么只需要将CE之间的数据重新录到E服务器中即可
+
+当然，一致性hash算法也有它的缺点，就是数据倾斜问题，如果两台服务器挨得过近：这样会导致大部分数据会落在A结点上，只有AB之间的数据会在B中
+
+<img src="Docker.assets/image-20221025153053126.png" alt="image-20221025153053126" style="zoom:80%;" />
+
+
+
+#### 3.2.3 哈希槽算法
+
+哈希槽实质上就是一个数组，由2^14个元素组成
+
+为了解决数据均匀分配的问题，需要在数据和redis结点之间再加入一层，一般把这层成为哈希槽，用于管理数据和结点之间的关系，现在就相当于结点上放的是槽，槽里放的是数据：
+
+<img src="Docker.assets/image-20221025154103318.png" alt="image-20221025154103318" style="zoom:80%;" />
+
+槽的出现解决的是粒度问题，相当于把粒度变大了，这样便于数据移动，总体流程就变成了，使用哈希计算数据所在的槽，再看这个槽存储在哪台redis机器上
+
+那么redis有多少个槽呢？一个集群固定有16384个槽（2^14）编号0 - 2^14-1，这些槽会分配给集群中的所有主节点，分配策略没有要求，可以指定哪些编号的槽分配给哪个主节点，集群会记录结点和槽的对应关系
+
+接下来就需要对数据进行哈希计算，然后对16384取余，余数假设是a，那么数据就落在编号为a的槽中，一般使用的是CRC校验码的方式：`slot = crc16(key) % 16384`之后如果要进行数据移动，则以槽为单位移动由于哈希槽的数目是固定的，处理起来比较容易，数据移动的问题就有了妥善的解决
+
+> 具体一点：redis集群中内置了16384个槽，redis会根据结点数量大致均等的将哈希槽映射到集群中的不同结点，之后要做的就是对数据进行crc16计算，并计算出数据所在槽的编号，比如现在要放数据A，计算出来槽的编号是6373，则这条数据就会落在第二台redis上；再比如数据B，计算出来槽的编号是14503，则它会落在第三胎redis中
+>
+> <img src="Docker.assets/image-20221025154754727.png" alt="image-20221025154754727" style="zoom:80%;" />
