@@ -323,7 +323,7 @@ public class MyRealm extends AuthorizingRealm {
             authenticationToken.getPrincipal(),   //用户输入的身份
             password,    //数据库中保存的用户的密码
                 ByteSource.Util.bytes("abc"),  //加密所需要的盐值
-                this.getName()   //用户输入的密码进行加密处理之后的密文
+                this.getName()   //当前Realm的名称，直接调用getName()方法即可
         );
         return info;
     }
@@ -376,4 +376,96 @@ public class UserService {
 ## 三、Shiro与Springboot的整合
 
 ### 3.1 框架整合
+
+以最基本的登录认证为例
+
+（1）导入依赖
+
+```xml
+<dependency>
+	<groupId>org.apache.shiro</groupId>
+    <artifactId>shiro-spring-boot-web-starter</artifactId>
+	<version>1.9.0</version>
+</dependency>
+```
+
+（2）根据要求编写自定义Realm实现自定义登录认证
+
+```java
+@Component
+public class MyRealm extends AuthorizingRealm {
+    
+    @Autowired
+    private UserService userService;
+
+    @Override //该方法只是获取进行对比的信息（即存储在数据库中的用户信息）
+    protected AuthenticationInfo doGetAuthenticationInfo(AuthenticationToken authenticationToken) throws AuthenticationException {
+        //1. 获取用户输入的身份信息和凭证信息（即用户名和密码）
+        String username = authenticationToken.getPrincipal().toString();
+
+        //2. 从数据库中根据用户名查询用户信息
+        User user = userService.getUserByUsername(username);
+        if(user == null) {
+            throw new UnknownAccountException("账户不存在！");
+        }
+        System.out.println("用户输入的用户名为：" + username);
+        //3. 创建封装校验的逻辑对象
+        AuthenticationInfo info = new SimpleAuthenticationInfo(
+            authenticationToken.getPrincipal(),   //用户输入的身份
+            user.getPassword(),    //数据库中保存的用户的密码
+            ByteSource.Util.bytes("abc"),  //加密所需要的盐值，如果在数据库中保存了盐值，则可从数据库中获取
+            this.getName()   //当前Realm的名称，直接调用getName()方法即可
+        );
+        return info;
+    }
+
+	
+    //自定义鉴权方法，主要是从数据库中获取用户的角色和权限
+    @Override
+    protected AuthorizationInfo doGetAuthorizationInfo(PrincipalCollection principals) {
+    }
+}
+```
+
+（3）编写ShiroConfig配置类
+
+```java
+@Configuration
+public class ShiroConfig {
+    
+    @Autowired
+    private MyRealm myRealm;
+    
+    //添加默认的web SecurityManager
+    @Bean
+    public DefaultWebSecurityManager defaultWebSecurityManager() {
+        
+        //1. 创建DefaultWebSecurityManager对象
+        DefaultWebSecurityManager defaultWebSecurityManager = new DefaultWebSecurityManager();
+        //2. 创建加密对象（MD5加密）---  这部分可以在自定义Realm时添加进去
+        HashedCrendenitalsMatcher matcher = new HashedCrendenitalsMatcher();
+        //2.1 设置加密算法
+        matcher.setHashAlgorithmName("md5");
+        //2.2 设置加密迭代次数
+        matcher.setHashIterations(1);
+        //3. 将加密对象存储到MyRealm中
+        myRealm.setCredentialsMatcher(matcher);
+        //4. 将MyRealm存储到DefaultWebSecurityManager对象中
+        defaultWebSecurityManager.setRealm(myRealm);
+        return defaultWebSecurityManager;
+    }
+    
+    //添加过滤器
+    @Bean
+    public DefaultShiroFilterChainDefinition shiroFilterChainDefinition() {
+        DefaultShiroFilterChainDefinition definition = new DefaultShiroFilterChainDefinition();
+        //设置哪些资源需要登录认证之后才能访问
+        definition.addPathDefinition("/**", "authc");  //"authc"即代表需要登录认证才能访问
+        //设置哪些资源不需要登录即可访问
+        definition.addPathDefinition("/login", "anon");  //"anon"即代表不需要登录即可访问
+        return definition;
+    }
+    
+}
+```
 

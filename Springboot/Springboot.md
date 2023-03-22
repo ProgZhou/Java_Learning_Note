@@ -192,7 +192,7 @@ public class HelloController {
 + 父项目做依赖管理
 
   ```xml
-  <!--当前项目依赖于父项目-->
+  <!--当前项目依赖于父项目，每一个springboot项目都要依赖与这个spring-boot-starter-parent-->
   <parent>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-parent</artifactId>
@@ -205,6 +205,11 @@ public class HelloController {
       <artifactId>spring-boot-dependencies</artifactId>
       <version>2.3.4.RELEASE</version>
   </parent>
+  
+  <properties>
+  	<!--声明了几乎所有可能用到的依赖的版本，避免版本冲突-->
+      <xxx.version>3.0.1</xxx.version>
+  </properties>
   
   在spring-boot-dependencies项目中几乎声明了开发中常用依赖的版本号，称为自动版本仲裁机制
   ```
@@ -2737,4 +2742,493 @@ static Stream<String> method() {
 #### 6. 原理解析
 
 
+
+
+
+
+
+### 四、Springboot项目打包
+
+**打包运行**
+
+在IDEA中配合Maven插件打包非常容易，点击package即可
+
+<img src="Springboot.assets/image-20230221095406281.png" alt="image-20230221095406281" style="zoom:80%;" />
+
+打包完成之后，在项目的target目录下就会生成对应的jar包
+
+<img src="Springboot.assets/image-20230221095453935.png" alt="image-20230221095453935" style="zoom:80%;" />
+
+直接使用java -jar命令即可运行jar包，如果想在linux上运行，需将jar包上传至linux服务器，并指定日志输出文件，采用后台启动的方式运行jar包
+
+
+
+**快速配置**
+
+当在服务器上运行的jar包有一些临时的配置需要修改，可以通过快速配置进行
+
+```shell
+java -jar xxxx.jar --server.port=8080
+#将jar包运行的端口设置为8080，可以覆盖原项目中yml配置文件中的配置，如果有多个属性，属性之间使用空格分隔
+```
+
+**临时属性**
+
+Springboot的启动类
+
+```java
+public class Application {
+    /*
+    args是系统带的参数，完全可以换成自定义的
+    */
+    public static void main(String[] args) {
+        String[] param = new String[] {"--server.port = 8080"};
+        //SpringApplication.run(Application.class, args);
+        SpringApplication.run(Application.class, params);  //运行起来也完全没有问题，只是启动端口变为8080
+    //为了防止系统参数被外部参数干扰，也可以采用无参的启动方式
+        SpringApplication.run(Application.class);
+    }
+    
+}
+```
+
+**配置文件分级**
+
+一般来说，Springboot项目结构中，resources目录下会有一个由开发人员创建的application.yml配置文件，但在实际生产中，会有一些特定的配置，保密级别比较高，会放在resources目录下新建的config目录下的application.yml中，在启动时，config下的application.yml会覆盖普通的application.yml
+
+当进行打包，运维人员在进行维护时，与打包后的jar包在同一级目录的application.yml会覆盖原有jar包中的两个application.yml配置，相同的，在同级目录下也会有config/application.yml
+
+所以Springboot可以同时拥有四级配置文件：
+
+```
+1级 file(打包后jar包所在目录)/config/application.yml
+2级 file/application.yml
+3级 resources(项目中的资源文件夹)/config/application.yml
+4级 resources/application.yml
+四级目录的优先级从高到底排列
+```
+
+**多环境开发**
+
+Springboot支持多环境配置，不同环境的配置文件命名：application-环境简称，比如application-dev表示开发环境、application-test表示测试环境，在最后的主配置文件application.yml中配置公共配置项，以及指定使用哪一个配置文件
+
+```yaml
+spring:
+ profiles:
+  active: dev/test/pro
+```
+
+在实际开发中，很多独立功能的配置会使用单独的application-xxx.yml进行配置，比如application-devDB.yml、application-devRedis.yml等，在主配置文件中进行相应的配置可以应用这些配置文件
+
+```yaml
+spring:
+ profiles:
+  active: dev
+  group:  #不同的组使用不同环境下的配置组
+   "dev": devDB,devRedis
+   "pro": proDB,proRedis
+```
+
+Springboot的多环境配置可以依赖与maven的环境配置，在maven中需要首先设置多环境的信息
+
+```xml
+<profiles>
+	<profile>
+    	<id>env_dev</id>  <!--某一项环境的标识-->
+        <properties>
+            <!--标签名可任意-->
+        	<profile.active>dev</profile.active>
+        </properties>
+        <activation>
+            <!--默认启动环境-->
+        	<activeByDefault>true</activeByDefault>
+        </activation>
+    </profile>
+    <profile>
+    	<id>env_pro</id>  <!--某一项环境的标识-->
+        <properties>
+            <!--标签名可任意-->
+        	<profile.active>pro</profile.active>
+        </properties>
+    </profile>
+</profiles>
+```
+
+在Springboot中的配置文件中可以引用这些环境的配置
+
+```yaml
+spring:
+ profiles:
+  active: @profile.active@  #读取的就是默认启动的环境
+```
+
+**日志操作**
+
+日志（log）的作用：
+
++ 编程期调试代码
++ 运营期记录信息
+  + 记录日常运营重要信息（峰值流量，平均响应时间）
+  + 记录应用报错信息（错误堆栈）
+  + 记录运维过程数据（扩容、宕机、报警）
+
+日志使用方式：
+
+```java
+@RestController
+@RequestMapping("/book")
+public class BookController {
+    //Sl4j的Logger和LoggerFactory
+    private static final Logger log = LoggerFactory.getLogger(BookController.class);
+    
+    @GetMapping("/get")
+    public String getById() {
+        log.debug("debug...");
+        log.info("info...");
+        log.error("error...");
+        log.warn("warn...")
+    }
+    
+}
+```
+
+日志配置：
+
+```yaml
+logging:
+ group:
+  #组名任意，后面为一个组内的包
+  ebank: com.xxxx.controller,com.xxxx.service,com.xxxx.mapper
+ level: 
+  root: info   #整个系统项目是info级别的日志
+  ebank: debug  #对某个组使用debug级别的日志
+```
+
+日志输出格式：
+
+<img src="Springboot.assets/image-20230222104118185.png" alt="image-20230222104118185" style="zoom:80%;" />
+
+通常在线上运行的项目需要把日志记录到文件中保存下来，Springboot提供了这些日志配置：
+
+```yaml
+logging:
+ file:
+  name: server.log  #保存的文件名，任意
+ logback:
+  rollingpolicy:
+   max-file-size: 10MB   #由于程序在一直运行，记录的日志量会很大，之后定位问题会很麻烦，所以需要将日志分开记录，当一个日志文件达到指定大小时，Springboot会自动将后续日志记录到新文件中
+   file-name-pattern: server.%d{yyyy-MM-dd}.%i.log
+   #日志文件名的格式，可根据需要进行设置
+```
+
+### 五、Springboot开发
+
+**Springboot自动热部署**
+
+导入devtools包
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-devtools</artifactId>
+</dependency>
+```
+
+在IDEA的设置中打开自动编译：当程序内容改变时，IDEA失去焦点5s之后便会自动重启项目
+
+<img src="Springboot.assets/image-20230222153320822.png" alt="image-20230222153320822" style="zoom:80%;" />
+
+<img src="Springboot.assets/image-20230222153335220.png" alt="image-20230222153335220" style="zoom:80%;" />
+
+**Springboot高级配置**
+
+`@ConfigurationProperties`注解可以为自定义bean绑定配置，也可以为第三方bean绑定配置
+
+```java
+@ConfigurationProperties(prefix = "servers")
+public class ServerConfig {
+    private String ipAddress;
+    private int port;
+    private long timeout;
+}
+
+yml配置：
+servers:
+  ipAddress: 127.0.0.1
+  port: 6379
+  timeout: -1
+      
+//为第三方bean绑定属性
+@Bean
+@ConfigurationProperties(prefix = "datasource")
+public DruidDataSource dataSource() {
+      DruidDataSource ds = new DruidDataSource();
+      return ds;
+  }
+
+datasource:
+  driverClassName: com.mysql.jdbc.Driver //属性名与类中的属性名一致`
+```
+
+`@ConfigurationProperties`注解支持宽松绑定，比如类中的属性是ipAddress，配置中可以写ipaddress，ip-address（官方推荐写法）等等。`@Value`注解不支持这种宽松绑定
+
+**Springboot测试**
+
+标准的Springboot的测试模块：
+
+```java
+@SpringbootTest
+public class xxxxTest {
+    @Test
+    void testxxxx() {
+    }
+    
+}
+```
+
+大多数时候，在测试时，需要在程序中添加一些临时属性。`@SpringbootTest`中有一个属性`String[] properties`可以添加一些临时属性，这样就能在不修改原有application.yml的情况下添加临时属性，并且不会对原有的配置产生干扰
+
+当临时配置与application.yml产生冲突时，properties中的临时属性可以覆盖application.yml中的配置
+
+```java
+@SpringbootTest(properties = {"test.prop=testValue"})
+public class xxxTest {
+    
+    @Value("${test.prop}")
+    private String msg;
+    
+    @Test
+    void test() {
+        System.out.println(msg); //输出testValue1
+    }
+    
+}
+```
+
+还有一些时候，需要为测试类专门注入一些特定的bean，这些bean只在测试中被使用，此时，需要将bean定义在测试包test下
+
+```java
+//这个bean需要定义在test目录下的包结构中
+@Configuration
+public class MessageConfiguration {
+    
+    @Bean
+    public String message() {
+        return "This is a test bean";
+    }
+    
+}
+
+@SpringbootTest
+//通过@Import注解导入相应的配置类
+@Import({MessageConfiguration.class})
+public class ConfigurationTest {
+    
+    @Autowired
+    private String message;
+    
+    @Test
+    void testMessage() {
+        System.out.println(message);
+    }
+    
+}
+```
+
+一般在Springboot的测试类中需要同时测试MVC三层，但测试Controller层需要Web环境，Springboot测试类中提供了测试所需要的web环境，`@SpringbootTest`注解中有webEnviornment属性，其中WebEnvironment中有四个常量
+
+```java
+@SpringbootTest(webEnvironment = SpringbootTest.WebEnvironment.RANDOM_PORT)
+public class WebTest {
+    
+}
+```
+
+<img src="Springboot.assets/image-20230223092432184.png" alt="image-20230223092432184" style="zoom: 80%;" />
+
+WebEnvironment创建了一个Web环境，在测试类中需要去模拟请求需要被测试的控制层接口
+
+```java
+@SpringbootTest(webEnvironment = SpringbootTest.WebEnvironment.RANDOM_PORT)
+//通过这个注解开启虚拟MVC调用
+@AutoConfigureMockMvc
+public class WebTest {
+    
+    @Test
+    //注入虚拟MVC调用对象
+    void testWeb(@Autowired MockMvc mvc) throws Exception {
+        //1. 创建虚拟请求，访问控制器方法，假设路径为/books
+        MockHttpServletRequestBuilder builder = MockMvcRequestBuilders.get("/books");
+        //2. 执行请求
+        RequestActions action = mvc.perform(builder);
+    }
+    
+}
+```
+
+在搭建好测试环境之后，就需要去验证测试是否通过，Springboot提供了web环境下测试的匹配工具
+
+```java
+@SpringbootTest(webEnvironment = SpringbootTest.WebEnvironment.RANDOM_PORT)
+//通过这个注解开启虚拟MVC调用
+@AutoConfigureMockMvc
+public class WebTest {
+    
+    @Test
+    //注入虚拟MVC调用对象
+    void testWeb(@Autowired MockMvc mvc) throws Exception {
+        //1. 创建虚拟请求，访问控制器方法，假设路径为/books
+        MockHttpServletRequestBuilder builder = MockMvcRequestBuilders.get("/books");
+        //2. 执行请求
+        RequestActions action = mvc.perform(builder);
+    	//3. 匹配执行状态，是否符合预期值
+        //3.1 定义执行状态匹配器
+        StatusResultMatchers status = MockMvcResultMatchers.status();
+        //3.2 定义预期执行状态
+        ResultMatcher ok = status.isOk();
+        //3.3 使用本次真实执行结果与预期结果进行对比
+        action.andExpect(ok);
+    }
+    
+} 
+```
+
+其中`MockMvcResultMatchers`可以进行多种状态的检测，可以根据不同的结构进行相应的匹配
+
+<img src="Springboot.assets/image-20230223094849401.png" alt="image-20230223094849401" style="zoom:80%;" />
+
+检测的匹配内容也有很多
+
+<img src="Springboot.assets/image-20230223094920930.png" alt="image-20230223094920930" style="zoom:80%;" />
+
+如果匹配成功，则控制台会输出相应的输出结果，但如果匹配失败，控制台会给出详细的请求响应信息
+
+<img src="Springboot.assets/image-20230223095025992.png" alt="image-20230223095025992" style="zoom:80%;" />
+
+<img src="Springboot.assets/image-20230223095017847.png" alt="image-20230223095017847" style="zoom:80%;" />
+
+在实际生产中，需要在一个测试方法中定义**多个匹配规则**，定义的规则越多，匹配规则越精准，但开发成本也会相应的增加
+
+在实际生产中，测试需要同时测试Mapper和Service层，但是测试往往会对数据库产生一些测试脏数据，这些数据在上线之前不应该存在，所以需要在测试之后清除这些数据，需要使用到测试的数据回滚，即在测试类上加上`@Transactional`注解
+
+**Springboot监控**
+
+监控的意义：
+
++ 监控服务状态是否宕机
++ 监控服务运行指标（内存、虚拟机、线程、请求等）
++ 监控日志
++ 管理服务（服务下线）
+
+Springboot的基本监控
+
+```xml
+<!--首先需要导入一个监控程序-->
+<dependency>
+	<groupId>de.codecentric</groupId>
+    <artifactId>spring-boot-admin-starter-server</artifactId>
+    <!--整个系统Springboot用的什么版本，这里就是什么版本-->
+    <version>2.3.7</version>
+</dependency>
+```
+
+配置监控服务的端口信息：
+
+```yaml
+server:
+ port: 8080   #端口任意，但不能有冲突
+```
+
+在启动类上加上注解
+
+```java
+@SpringbootApplication
+@EnableAdminServer
+public class ActuatorApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ActuatorApplication.class, args);
+    }
+}
+```
+
+直接启动服务即可进入监控页面
+
+<img src="Springboot.assets/image-20230223144351065.png" alt="image-20230223144351065" style="zoom:80%;" />
+
+然后配置需要被监控的服务
+
+```xml
+<!--在需要被监控的服务中导入配置-->
+<dependency>
+	<groupId>de.codecentric</groupId>
+    <artifactId>spring-boot-admin-starter-client</artifactId>
+    <!--整个系统Springboot用的什么版本，这里就是什么版本-->
+    <version>2.3.7</version>
+</dependency>
+```
+
+配置监控器的url
+
+```yaml
+server:
+ port: 80
+spring:
+ boot:
+  admin:
+   client: 
+    url: http://localhost:8080
+```
+
+启动被监控的服务之后，监控界面就会发生变化
+
+<img src="Springboot.assets/image-20230223144659051.png" alt="image-20230223144659051" style="zoom:80%;" />
+
+被监控的服务可以决定对监控服务开放被监控的功能，比如监控服务的健康信息等，需要在被监控服务的配置文件中进行配置
+
+```yaml
+server:
+ port: 80
+spring:
+ boot:
+  admin:
+   client: 
+    url: http://localhost:8080
+management:
+ endpoint:
+  health:
+   show-details: always #默认是never，即不显示健康信息
+ endpoints:
+  web:
+   exposure: 
+    include: "*"  #指对监控服务开放所有的监控节点，即监控服务能够看到当前服务运行的所有详细信息，默认能够看到健康信息
+```
+
+开放之后，监控服务的界面就能看到结果：
+
+<img src="Springboot.assets/image-20230223145910184.png" alt="image-20230223145910184" style="zoom:80%;" />
+
+<img src="Springboot.assets/image-20230223145918656.png" alt="image-20230223145918656" style="zoom:80%;" />
+
+在Springboot中，由Actuator完成对程序的监控
+
++ Actuator提供了Springboot生产就绪功能，通过端点的配置与访问，获取端点信息
++ 端点描述了一组监控信息，Springboot提供了多个内置端点，也可以根据需要自定义端点信息
++ 访问当前应用所有端点信息：/actuator
++ 访问端点的详细信息：/actuator/端点名称
+
+总共能够检测的端点是13个，可以通过被监控程序的配置文件来启用端点
+
+```yaml
+management:
+ endpoint: 
+  health:
+   enabled: true  #表示对外开放端点
+   show-details: always
+  info:  #端点名称
+   enabled: true
+###可以通过下面的配置来启用所有端点
+management:
+ endpoints:
+  enabled-by-default: true
+```
 
