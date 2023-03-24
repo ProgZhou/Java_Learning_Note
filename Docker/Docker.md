@@ -510,7 +510,7 @@ dc120c3e0290: Pull complete
 4f25def12f23: Pull complete 
 ```
 
-Union文件系统是docker镜像的基础，镜像可以通过分层来进行继承，基于基础镜像可以制作各种具体的应用镜像
+Union文件系统是docker镜像的基础，*镜像可以通过分层来进行继承，基于基础镜像可以制作各种具体的应用镜像*
 
 联合文件系统的特性就是一次同时会加载多个文件系统，但从结果来看，只能看到一个文件系统，联合加载会把各层文件系统叠加起来，这样最终的文件系统会包含所有底层的文件和目录
 
@@ -952,7 +952,175 @@ docker run -p 6379:6379 --name some-redis --privileged=true
 
 #### 3.1.2 Redis主从搭建
 
+3主3从redis集群扩缩容配置案例：
 
+<img src="Docker.assets/image-20230324091636768.png" alt="image-20230324091636768" style="zoom:80%;" />
+
+
+
+首先启动一台redis主机，命令：
+
+```
+[root@ docker]# docker run -d --name redis-node-1 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-1:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6381
+## 之后以相同的形式按照结构图启动另外五台redis容器
+docker run -d --name redis-node-2 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-2:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6382
+
+docker run -d --name redis-node-3 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-3:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6383
+
+docker run -d --name redis-node-4 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-4:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6384
+
+docker run -d --name redis-node-5 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-5:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6385
+
+docker run -d --name redis-node-6 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-6:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6386
+```
+
+启动完成之后，利用`docker ps`命令查看启动情况：此时，这六台redis是完全平等的，没有主从之分
+
+```
+[root@ docker]# docker ps
+CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS          PORTS     NAMES
+dd68fa1b03fe   redis:6.2.4   "docker-entrypoint.s…"   3 seconds ago    Up 2 seconds              redis-node-6
+a91e27066b9e   redis:6.2.4   "docker-entrypoint.s…"   11 seconds ago   Up 10 seconds             redis-node-5
+38438c580ed2   redis:6.2.4   "docker-entrypoint.s…"   20 seconds ago   Up 19 seconds             redis-node-4
+7bc5b97bcf2b   redis:6.2.4   "docker-entrypoint.s…"   30 seconds ago   Up 29 seconds             redis-node-3
+e1c7076c4ef0   redis:6.2.4   "docker-entrypoint.s…"   39 seconds ago   Up 39 seconds             redis-node-2
+c3a83c3130ab   redis:6.2.4   "docker-entrypoint.s…"   2 minutes ago    Up 2 minutes              redis-node-1
+```
+
+进入其中一台redis容器（任意一台），并执行以下命令：
+
+```
+redis-cli --cluster create 172.31.89.115:6381 172.31.89.115:6382 172.31.89.115:6383 172.31.89.115:6384 172.31.89.115:6385 172.31.89.115:6386 --cluster-replicas 1  ##这条命令的意思是为每一个master创建一个slave节点
+#####执行结果：
+>>> Performing hash slots allocation on 6 nodes...   ##为每一台redis主机分配hash槽
+Master[0] -> Slots 0 - 5460
+Master[1] -> Slots 5461 - 10922
+Master[2] -> Slots 10923 - 16383
+Adding replica 172.31.89.115:6385 to 172.31.89.115:6381
+Adding replica 172.31.89.115:6386 to 172.31.89.115:6382
+Adding replica 172.31.89.115:6384 to 172.31.89.115:6383
+>>> Trying to optimize slaves allocation for anti-affinity
+[WARNING] Some slaves are in the same host as their master
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[0-5460] (5461 slots) master
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[5461-10922] (5462 slots) master
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[10923-16383] (5461 slots) master
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+Can I set the above configuration? (type 'yes' to accept): yes   ##输入yes
+>>> Nodes configuration updated
+>>> Assign a different config epoch to each node
+>>> Sending CLUSTER MEET messages to join the cluster
+Waiting for the cluster to join
+.
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[0-5460] (5461 slots) master
+   1 additional replica(s)
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[5461-10922] (5462 slots) master
+   1 additional replica(s)
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   slots: (0 slots) slave
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   slots: (0 slots) slave
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[10923-16383] (5461 slots) master
+   1 additional replica(s)
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   slots: (0 slots) slave
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+[OK] All nodes agree about slots configuration.
+>>> Check for open slots...
+>>> Check slots coverage... 
+[OK] All 16384 slots covered.    ##出现这句话表明分配完成
+
+```
+
+至此，基本的redis三主三从集群搭建完毕，可以进入redis-node-1节点，使用`cluster info`命令查看集群状态，也可以使用`cluster node`查询集群主从机：
+
+```
+root@ :/data# redis-cli -p 6381
+127.0.0.1:6381> cluster info
+cluster_state:ok
+cluster_slots_assigned:16384
+cluster_slots_ok:16384
+cluster_slots_pfail:0
+cluster_slots_fail:0
+cluster_known_nodes:6
+cluster_size:3
+cluster_current_epoch:6
+cluster_my_epoch:1
+cluster_stats_messages_ping_sent:169
+cluster_stats_messages_pong_sent:161
+cluster_stats_messages_sent:330
+cluster_stats_messages_ping_received:156
+cluster_stats_messages_pong_received:169
+cluster_stats_messages_meet_received:5
+cluster_stats_messages_received:330
+127.0.0.1:6381> cluster nodes    ##下面显示了每一台容器的基本角色，master or slave 通过容器的id可以对主从机进行一一配对
+93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382@16382 master - 0 1679622207000 2 connected 5461-10922
+4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386@16386 slave 93bcb14aff0e102ef8af398e61a418e725d5265b 0 1679622208425 2 connected
+34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384@16384 slave d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 0 1679622208000 3 connected
+d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383@16383 master - 0 1679622209427 3 connected 10923-16383
+3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381@16381 myself,master - 0 1679622206000 1 connected 0-5460
+731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385@16385 slave 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 0 1679622207422 1 connected
+
+Master     Slave
+ 6381       6385
+ 6382       6386
+ 6383       6384 
+
+```
+
+> redis集群读写error：在当前的集群环境下，如果使用`redis-cli -p 6381`进入某一个节点进行set值操作有可能会操作失败
+>
+> ```
+> 127.0.0.1:6381> set k1 v1
+> (error) MOVED 12706 172.31.89.115:6383
+> ```
+>
+> 这是由于在集群环境下，redis使用hash槽算法进行值的分配，通过错误提示，发现k1的hash值为12706超过了6381所在机器的hash槽的值，所以会出现错误
+>
+> 解决方案，在进入容器时添加-c参数，使用集群环境进入
+>
+> ```
+> root@:/data# redis-cli -p 6381 -c
+> 127.0.0.1:6381> set k1 v1
+> -> Redirected to slot [12706] located at 172.31.89.115:6383
+> OK
+> ```
+
+在使用redis集群的过程中可以通过`redis-cli --cluster check ip:port`查看集群的信息
+
+```
+root@:/data# redis-cli --cluster check 172.31.89.115:6381   ##显示每台集群中每台redis主机存储的key情况
+172.31.89.115:6381 (3a9e0846...) -> 2 keys | 5461 slots | 1 slaves.
+172.31.89.115:6382 (93bcb14a...) -> 1 keys | 5462 slots | 1 slaves.
+172.31.89.115:6383 (d85d82d7...) -> 1 keys | 5461 slots | 1 slaves.
+[OK] 4 keys in 3 masters.
+0.00 keys per slot on average.
+```
 
 
 
@@ -1027,3 +1195,241 @@ docker run -p 6379:6379 --name some-redis --privileged=true
 > 具体一点：redis集群中内置了16384个槽，redis会根据结点数量大致均等的将哈希槽映射到集群中的不同结点，之后要做的就是对数据进行crc16计算，并计算出数据所在槽的编号，比如现在要放数据A，计算出来槽的编号是6373，则这条数据就会落在第二台redis上；再比如数据B，计算出来槽的编号是14503，则它会落在第三胎redis中
 >
 > <img src="Docker.assets/image-20221025154754727.png" alt="image-20221025154754727" style="zoom:80%;" />
+
+### 3.3 Redis主从集群
+
+#### 3.3.1 主从容错迁移
+
+之前已经在docker中搭建了最基本的redis三主三从的集群，此时，需要测试以下redis集群的主从迁移
+
+<img src="Docker.assets/image-20230324100839191.png" alt="image-20230324100839191" style="zoom:80%;" />
+
+（1）首先尝试主机和从机的切换，停止主机6381
+
+```
+[root@iZ0jlh6etolgnm8tzsg4rxZ redis-cluster]# docker stop redis-node-1
+redis-node-1
+[root@iZ0jlh6etolgnm8tzsg4rxZ redis-cluster]# docker ps
+CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS          PORTS     NAMES
+dd68fa1b03fe   redis:6.2.4   "docker-entrypoint.s…"   43 minutes ago   Up 43 minutes             redis-node-6
+a91e27066b9e   redis:6.2.4   "docker-entrypoint.s…"   43 minutes ago   Up 43 minutes             redis-node-5
+38438c580ed2   redis:6.2.4   "docker-entrypoint.s…"   43 minutes ago   Up 43 minutes             redis-node-4
+7bc5b97bcf2b   redis:6.2.4   "docker-entrypoint.s…"   43 minutes ago   Up 43 minutes             redis-node-3
+e1c7076c4ef0   redis:6.2.4   "docker-entrypoint.s…"   43 minutes ago   Up 43 minutes             redis-node-2
+```
+
+进入其中一台剩余的容器查看集群情况，发现总共集群中有六个节点，但只存活了五个，其中6381节点的状态是fail，6385容器成了新的master，但是之前set的key仍然能够取出来：
+
+```
+[root@ redis-cluster]# docker exec -it redis-node-2 /bin/bash
+root@:/data# redis-cli -p 6382 -c
+127.0.0.1:6382> cluster nodes
+34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384@16384 slave d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 0 1679623873000 3 connected
+731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385@16385 master - 0 1679623873468 7 connected 0-5460
+d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383@16383 master - 0 1679623874472 3 connected 10923-16383
+3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381@16381 master,fail - 1679623815145 1679623812128 1 disconnected
+4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386@16386 slave 93bcb14aff0e102ef8af398e61a418e725d5265b 0 1679623873000 2 connected
+93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382@16382 myself,master - 0 1679623871000 2 connected 5461-10922
+#################################################
+127.0.0.1:6382> get k1
+-> Redirected to slot [12706] located at 172.31.89.115:6383
+"v1"
+172.31.89.115:6383> get k2
+-> Redirected to slot [449] located at 172.31.89.115:6385
+"v2"
+172.31.89.115:6385> get k3
+"v3"
+172.31.89.115:6385> get k4
+-> Redirected to slot [8455] located at 172.31.89.115:6382
+"v4"
+```
+
+（2）在6381容器停止之后，6385容器成了新的master，现在重新启动6381容器，再次查看集群信息，6381已经成为slave：
+
+```
+[root@ docker]# docker start redis-node-1
+redis-node-1
+[root@ docker]# docker ps
+CONTAINER ID   IMAGE         COMMAND                  CREATED          STATUS          PORTS     NAMES
+dd68fa1b03fe   redis:6.2.4   "docker-entrypoint.s…"   48 minutes ago   Up 48 minutes             redis-node-6
+a91e27066b9e   redis:6.2.4   "docker-entrypoint.s…"   48 minutes ago   Up 48 minutes             redis-node-5
+38438c580ed2   redis:6.2.4   "docker-entrypoint.s…"   48 minutes ago   Up 48 minutes             redis-node-4
+7bc5b97bcf2b   redis:6.2.4   "docker-entrypoint.s…"   48 minutes ago   Up 48 minutes             redis-node-3
+e1c7076c4ef0   redis:6.2.4   "docker-entrypoint.s…"   48 minutes ago   Up 48 minutes             redis-node-2
+c3a83c3130ab   redis:6.2.4   "docker-entrypoint.s…"   50 minutes ago   Up 2 seconds              redis-node-1
+
+172.31.89.115:6382> cluster nodes
+34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384@16384 slave d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 0 1679624237354 3 connected
+731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385@16385 master - 0 1679624238000 7 connected 0-5460
+d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383@16383 master - 0 1679624238356 3 connected 10923-16383
+3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381@16381 [slave] 731ff8ff84c134783cae59d0102b29a9da666d9c 0 1679624236000 7 connected
+4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386@16386 slave 93bcb14aff0e102ef8af398e61a418e725d5265b 0 1679624239360 2 connected
+93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382@16382 myself,master - 0 1679624237000 2 connected 5461-10922
+```
+
+#### 3.3.2 集群扩容
+
+现在需要将集群的规模扩展至四主四从，新增6387和6388，并且6388是6387的从机：
+
+<img src="Docker.assets/image-20230324102511281.png" alt="image-20230324102511281" style="zoom:80%;" />
+
+增加机器之后，首先需要考虑到的问题就是hash槽的重新分配，如何在原有分配的基础上再次进行hash槽分配，最终形成一个稳定的集群
+
+<img src="Docker.assets/image-20230324102616768.png" alt="image-20230324102616768" style="zoom:80%;" />
+
+步骤：
+
+（1）新建6387和6388两个节点，并启动
+
+```
+docker run -d --name redis-node-7 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-7:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6387
+
+docker run -d --name redis-node-8 --net host --privileged=true \
+-v /usr/local/docker/redis-cluster/redis-node-8:/data redis:6.2.4 \
+--cluster-enabled yes --appendonly yes --port 6388
+```
+
+（2）进入6387内部，将6387节点作为master节点加入集群中
+
+```
+[root@ docker]# docker exec -it redis-node-7 /bin/bash
+root@:/data# redis-cli --cluster add-node 172.31.89.115:6387 172.31.89.115:6381
+### 6387是将要作为naster的新增节点，6381是原来集群中的master节点，相当于6387通过6381从而找到集群并加入
+>>> Adding node 172.31.89.115:6387 to cluster 172.31.89.115:6381
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+.....
+[OK] All nodes agree about slots configuration.
+>>> Check for open slots...
+>>> Check slots coverage...
+[OK] All 16384 slots covered.
+>>> Send CLUSTER MEET to node 172.31.89.115:6387 to make it join the cluster.
+[OK] New node added correctly.
+```
+
+（3）查询6387加入后的集群信息，但此时6387并没有被分配到任何hash槽：
+
+```
+root@:/data# redis-cli --cluster check 172.31.89.115:6381
+172.31.89.115:6381 (3a9e0846...) -> 2 keys | 5461 slots | 1 slaves.
+172.31.89.115:6382 (93bcb14a...) -> 1 keys | 5462 slots | 1 slaves.
+172.31.89.115:6387 (ef99c165...) -> 0 keys | [0 slots] | 0 slaves.
+172.31.89.115:6383 (d85d82d7...) -> 1 keys | 5461 slots | 1 slaves.
+[OK] 4 keys in 4 masters.
+0.00 keys per slot on average.
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[0-5460] (5461 slots) master
+   1 additional replica(s)
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[5461-10922] (5462 slots) master
+   1 additional replica(s)
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   slots: (0 slots) slave
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   slots: (0 slots) slave
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+M: ef99c1652778222dabe28591189402b3a413ded2 172.31.89.115:6387
+   slots: (0 slots) master
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   slots: (0 slots) slave
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[10923-16383] (5461 slots) master
+   1 additional replica(s)
+```
+
+**（4）重新对集群中的master节点分配槽号**
+
+```
+redis-cli --cluster reshard 172.31.89.115:6381
+```
+
+<img src="Docker.assets/image-20230324104552803.png" alt="image-20230324104552803" style="zoom:80%;" />
+
+<img src="Docker.assets/image-20230324104615664.png" alt="image-20230324104615664" style="zoom:80%;" />
+
+（5）在分配完成之后，再次查看集群的信息，观察每个master的槽信息
+
+对于新分配的槽，是**从原来6381、6382、6383的槽中抽取前1365个槽分配给6387**，并不是重新按照数量分配
+
+```
+root@:/data# redis-cli --cluster check 172.31.89.115:6381
+172.31.89.115:6381 (3a9e0846...) -> 1 keys | 4096 slots | 1 slaves.
+172.31.89.115:6382 (93bcb14a...) -> 1 keys | 4096 slots | 1 slaves.
+172.31.89.115:6387 (ef99c165...) -> 1 keys | 4096 slots | 0 slaves.
+172.31.89.115:6383 (d85d82d7...) -> 1 keys | 4096 slots | 1 slaves.
+[OK] 4 keys in 4 masters.
+0.00 keys per slot on average.
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[1365-5460] (4096 slots) master   ######原来的6381的槽0 - 5460
+   1 additional replica(s)
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[6827-10922] (4096 slots) master  #######原来的6382的槽 5461 - 10922
+   1 additional replica(s)
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   slots: (0 slots) slave
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   slots: (0 slots) slave
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+M: ef99c1652778222dabe28591189402b3a413ded2 172.31.89.115:6387
+   slots:[0-1364],[5461-6826],[10923-12287] (4096 slots) master   ####新分配的槽从原来的三个master中抽取一点分配给新来的主机
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   slots: (0 slots) slave
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[12288-16383] (4096 slots) master  #######原来的6383的槽 10923 - 16383
+   1 additional replica(s)
+[OK] All nodes agree about slots configuration.
+>>> Check for open slots...
+>>> Check slots coverage...
+[OK] All 16384 slots covered.
+```
+
+（6）为主节点6387分配一个从机节点6388，添加完成之后再次查看集群信息
+
+```
+redis-cli --cluster add-node 172.31.89.115:6388 172.31.89.115:6387 --cluster-slave --cluster-master-id ef99c1652778222dabe28591189402b3a413ded2   ###主机的容器id
+
+root@:/data# redis-cli --cluster check 172.31.89.115:6381
+172.31.89.115:6381 (3a9e0846...) -> 1 keys | 4096 slots | 1 slaves.
+172.31.89.115:6382 (93bcb14a...) -> 1 keys | 4096 slots | 1 slaves.
+172.31.89.115:6387 (ef99c165...) -> 1 keys | 4096 slots | 1 slaves.
+172.31.89.115:6383 (d85d82d7...) -> 1 keys | 4096 slots | 1 slaves.
+[OK] 4 keys in 4 masters.
+0.00 keys per slot on average.
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[1365-5460] (4096 slots) master
+   1 additional replica(s)
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[6827-10922] (4096 slots) master
+   1 additional replica(s)
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   slots: (0 slots) slave
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+S: fe6d3f1de1d62614bc2eec6e0f72921e0f8c7fc2 172.31.89.115:6388  【新加入的slave】
+   slots: (0 slots) slave                                     
+   replicates ef99c1652778222dabe28591189402b3a413ded2
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   slots: (0 slots) slave
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+M: ef99c1652778222dabe28591189402b3a413ded2 172.31.89.115:6387
+   slots:[0-1364],[5461-6826],[10923-12287] (4096 slots) master
+   1 additional replica(s)
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   slots: (0 slots) slave
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[12288-16383] (4096 slots) master
+   1 additional replica(s)
+[OK] All nodes agree about slots configuration.
+>>> Check for open slots...
+>>> Check slots coverage...
+[OK] All 16384 slots covered.
+```
+
