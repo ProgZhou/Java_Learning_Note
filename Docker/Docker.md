@@ -1433,3 +1433,300 @@ M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
 [OK] All 16384 slots covered.
 ```
 
+#### 3.3.3 集群缩容
+
+缩容需求：扩容需求往往是由流量高峰引起的，但流量高峰不会持续太长的时间，当流量高峰过去之后，需要将集群重新缩容至三主三从
+
+redis集群缩容，删除6387和6388容器，恢复至三主三从
+
+<img src="Docker.assets/image-20230325092823641.png" alt="image-20230325092823641" style="zoom:80%;" />
+
+步骤：
+
+（1）先清除从节点6388 `redis-cli --cluster del-node ip:端口 容器id `
+
+```
+root@:/data# redis-cli --cluster del-node 172.31.89.115:6388 fe6d3f1de1d62614bc2eec6e0f72921e0f8c7fc2
+>>> Removing node fe6d3f1de1d62614bc2eec6e0f72921e0f8c7fc2 from cluster 172.31.89.115:6388
+>>> Sending CLUSTER FORGET messages to the cluster...
+>>> Sending CLUSTER RESET SOFT to the deleted node.
+#####删除后重新检查集群的状态：只有三个从机了
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[1365-5460] (4096 slots) master
+   1 additional replica(s)
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[6827-10922] (4096 slots) master
+   1 additional replica(s)
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   slots: (0 slots) slave
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   slots: (0 slots) slave
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+M: ef99c1652778222dabe28591189402b3a413ded2 172.31.89.115:6387
+   slots:[0-1364],[5461-6826],[10923-12287] (4096 slots) master
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   slots: (0 slots) slave
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[12288-16383] (4096 slots) master
+   1 additional replica(s)
+
+```
+
+
+
+（2）将hash槽重新分配
+
+```
+redis-cli --cluster reshard 172.31.89.115:6381
+```
+
+<img src="Docker.assets/image-20230325094110620.png" alt="image-20230325094110620" style="zoom:80%;" />
+
+（3）再删除6387
+
+```
+####使用同样的删除命令，删除6387容器
+redis-cli --cluster del-node 172.31.89.115:6387 ef99c1652778222dabe28591189402b3a413ded2[6387的容器id]
+```
+
+（4）恢复至三主三从
+
+```
+root@:/data# redis-cli --cluster check 172.31.89.115:6381
+172.31.89.115:6381 (3a9e0846...) -> 2 keys | 8192 slots | 1 slaves.   [6381有8192个槽位]
+172.31.89.115:6382 (93bcb14a...) -> 1 keys | 4096 slots | 1 slaves.
+172.31.89.115:6383 (d85d82d7...) -> 1 keys | 4096 slots | 1 slaves.
+[OK] 4 keys in 3 masters.
+0.00 keys per slot on average.
+>>> Performing Cluster Check (using node 172.31.89.115:6381)
+M: 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c 172.31.89.115:6381
+   slots:[0-6826],[10923-12287] (8192 slots) master
+   1 additional replica(s)
+M: 93bcb14aff0e102ef8af398e61a418e725d5265b 172.31.89.115:6382
+   slots:[6827-10922] (4096 slots) master
+   1 additional replica(s)
+S: 4e3f9269723b022fed7a906785461283baede22f 172.31.89.115:6386
+   slots: (0 slots) slave
+   replicates 93bcb14aff0e102ef8af398e61a418e725d5265b
+S: 34f75d78581c8a4040a04cac648a8b66b4f87d09 172.31.89.115:6384
+   slots: (0 slots) slave
+   replicates d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8
+S: 731ff8ff84c134783cae59d0102b29a9da666d9c 172.31.89.115:6385
+   slots: (0 slots) slave
+   replicates 3a9e0846e1412c9fe8d236bf7fd74685f1036f4c
+M: d85d82d7b206c9e8ef8d9b45486dfd5bb5ef1bc8 172.31.89.115:6383
+   slots:[12288-16383] (4096 slots) master
+   1 additional replica(s)
+```
+
+### 3.4 DockerFile
+
+#### 3.4.1 dockerfile简介
+
+DockerFile是用来构建Docker镜像的文本文件，是由一条条构建镜像所需要的指令和参数构成的脚本
+
+即能够通过DockerFile直接build出一个docker image
+
+<img src="Docker.assets/image-20230325095216992.png" alt="image-20230325095216992" style="zoom:80%;" />
+
+其使用的基本步骤为：
+
++ 编写DockerFile文件
++ docker build命令构建docker镜像
++ docker run运行镜像构建容器
+
+#### 3.4.2 DokcerFile构建过程
+
+DockerFile的一些基本语法：
+
++ 每条保留字指令都必须为大写字母，并且后面要跟随至少一个参数
++ 指令按照从上到下顺序执行
++ #表示注释
++ **每条指令都会创建一个新的镜像层并对镜像进行提交**
+
+DockerFile执行的大致流程：
+
++ Docker从基础镜像运行一个容器
++ 执行一条DockerFile上的指令并对容器进行修改
++ 执行类似docker commit的操作提交一个新的镜像层
++ docker再基于刚提交的镜像运行一个新容器
++ 执行dockerfile中的下一条指令直到所有执行都执行完成
+
+> DockerFile上的指令即是对容器进行修改，每进行一次修改就提交为一个新的镜像，重复此过程最终构建出一个理想的docker镜像
+>
+> DockerFile有点类似于Java中定义类的一个过程，定义完成之后形成一个Docker镜像，之后就可以通过new（docker run）去运行容器
+
+#### 3.4.3 DockerFile常用保留字
+
+**FROM**
+
+基础镜像，当前新镜像是基于哪一个镜像的，指定一个已经存在的镜像作为模板，*DockerFile的第一条必须是FROM*
+
+**MAINTAINER**
+
+镜像维护者的姓名和邮箱地址
+
+**RUN**
+
+容器构建时需要运行的命令，有两种格式：
+
++ shell格式：`RUN <命令行命令>`
+
+  ```shell
+  ##比方说要在基础的ubuntu镜像上安装vim命令
+  RUN yum -y install vim   #yum -y install vim即是在ubuntu中安装vim的命令，当进行build时会在ubuntu容器终端运行这条yum命令
+  ```
+
++ exec格式：`RUN ["可执行文件", "参数1", "参数2"]`
+
+RUN命令是在docker build时运行的
+
+**EXPOSE**
+
+当前容器对外暴露的端口
+
+**WORKDIR**
+
+指定在创建容器后，终端默认登录进来的工作目录，即在`docker run -it 镜像 /bin/bash`进入的工作目录
+
+```
+docker run -it ubuntu /bin/bash
+进入的就是/根目录
+docker run -it -p 8080:8080 tomcat bash
+进入的目录是/usr/local/tomcat
+```
+
+**USER**
+
+指定该镜像以什么样的用户去执行，如果都不指定，默认是root
+
+**ENV**
+
+用来在构建镜像时设置环境变量
+
+```
+ENV MY_PATH /usr/test   #这个环境变量可以在后续的任何RUN指令中使用，也可以在其他指令使用，相当于定义了一个常量
+WORKDIR $MY_PATH   #即工作目录为/usr/test
+```
+
+**VOLUME**
+
+容器数据卷，用于持久化，相当于docker run -v参数
+
+
+
+**ADD / COPY**
+
+ADD：将宿主机目录下的文件拷贝进镜像且会自动处理URL和解压tar压缩包
+
+> 比方说在镜像中需要安装一个jdk8，可以使用ADD命令将宿主机中的jdk8的压缩包复制到镜像中并完成解压
+
+CPOY：类似ADD，拷贝文件和目录到镜像中，将从构建上下文目录中<源路径>的文件 / 目录复制到新的一层的镜像内的<目标路径>
+
+> `COPY src dest`或者`COPY ["src" "dest"]`
+>
+> <src源路径>：源文件或者源目录
+>
+> <dest目标路径>：容器内指定路径
+
+**CMD / ENTRYPOINT**
+
+CMD命令：指定容器启动后要干的事情
+
+```
+CMD容器启动命令的格式与RUN相似，也是两种格式
+（1）shell格式：CMD <命令>
+（2）exec格式：CMD ["可执行文件", "参数1", "参数2", ...]
+```
+
+DockerFile中可以有多个CMD指令，但最终只有最后一个生效，CMD会被docker run之后的参数替换
+
+> 比如，tomcat的DockerFile中，最后一行`CMD ["catalina.sh", "run"]`，也就是当执行`docker run -it -p 8080:8080 tomcat`，默认的运行的是catalina.sh脚本，能够顺利启动tomcat容器，但如果使用`docker run -it -p 8080:8080 tomcat /bin/bash`则不会启动tomcat，主机也无法连接至tomcat，这就表明，docker run之后的参数会覆盖掉CMD命令的参数
+
+CMD命令与RUN命令的区别：
+
++ RUN命令在docker build时运行
++ CMD命令在docker run时运行
+
+
+
+ENTRYPOINT：也是用来指定一个容器启动时要运行的命令，类似于CMD命令，但是ENTRYPOINT不会被docker run后面的命令覆盖，而且这些命令行参数会被当做参数送给ENTRYPOINT指令指定的程序
+
+`ENTRYPOINT ["命令", "参数1", "参数2", ...]`
+
+ENTRYPOINT可以和CMD一起用，一般是变参才会使用CMD，这里的CMD等于是在给ENTRYPOINT传参，比如：
+
+```
+FROM nginx
+ENTRYPOINT ["nginx", "-c"]
+CMD ["/etc/nginx/nginx.conf"]   ##最后使用docker run运行之后，实际执行的命令是nginx -c /etc/nginx/nginx.conf
+##如果docker run之后携带了新的参数，则新的参数会覆盖CMD的参数
+```
+
+#### 3.4.4 DockerFile示例
+
+**centos镜像上安装Java8**
+
+（1）首先，先拉取一个centos的镜像到本地（centos7版本）
+
+```
+docker pull centos:7
+docker images
+REPOSITORY    TAG       IMAGE ID       CREATED         SIZE
+centos        7         eeb6ee3f44bd   18 months ago   204MB
+```
+
+（2）编写Dockerfile文件，文件名必须为Dockerfile
+
+```dockerfile
+vim Dockerfile
+
+FROM centos:7
+MAINTAINER progZhou
+
+ENV MY_PATH /usr/local
+WORKDIR $MY_PATH
+
+##安装vim编辑器
+RUN yum -y install vim
+##安装ifconfig命令
+RUN yum -y install net-tools
+##安装java8及lib库
+RUN yum -y install glibc.i686
+RUN mkdir /usr/local/java
+##ADD是相对路径，下载的jar包需要和Dockerfile文件在同一个目录下
+ADD jdk-8u321-linux-x64.tar.gz /usr/local/java/
+
+##配置Java环境变量
+ENV JAVA_HOME /usr/local/java/jdk1.8.0_321
+ENV JRE_HOME $JAVA_HOME/jre
+ENV CLASSPATH $JAVA_HOME/lib/dt.jar:$JAVA_HOME/lib/tools.jar:$JRE_HOME/lib:$CLASSPATH
+ENV PATH $JAVA_HOME/bin:$PATH
+
+EXPOSE 80
+
+CMD echo $MY_PATH
+CMD echo "success ---------------- ok"
+CMD /bin/bash
+```
+
+（3）将Dockerfile中使用到的jdk下载至目录中（jdk tar包与Dockerfile在同一目录下）
+
+（4）指令docker build指令构建新镜像
+
+```
+docker build -t centos/java:1.1 .   ##镜像名与版本号任意
+```
+
+（5）查看新构建的镜像
+
+```
+docker images
+REPOSITORY    TAG       IMAGE ID       CREATED          SIZE
+centos/java   1.1       34ca5f877583   10 minutes ago   919MB
+centos        7         eeb6ee3f44bd   18 months ago    204MB
+```
+
