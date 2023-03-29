@@ -1676,7 +1676,8 @@ CMD ["/etc/nginx/nginx.conf"]   ##最后使用docker run运行之后，实际执
 docker pull centos:7
 docker images
 REPOSITORY    TAG       IMAGE ID       CREATED         SIZE
-centos        7         eeb6ee3f44bd   18 months ago   204MB
+centos        7         eeb6ee3f44bd   18 months ago   204MB     
+##一定要7版本的centos，如果拉取的是最新版本的centos，默认是8，后续使用yum时会出现问题
 ```
 
 （2）编写Dockerfile文件，文件名必须为Dockerfile
@@ -1697,7 +1698,7 @@ RUN yum -y install net-tools
 ##安装java8及lib库
 RUN yum -y install glibc.i686
 RUN mkdir /usr/local/java
-##ADD是相对路径，下载的jar包需要和Dockerfile文件在同一个目录下
+##ADD是相对路径，下载的在宿主机的jar包需要和Dockerfile文件在同一个目录下
 ADD jdk-8u321-linux-x64.tar.gz /usr/local/java/
 
 ##配置Java环境变量
@@ -1730,3 +1731,233 @@ centos/java   1.1       34ca5f877583   10 minutes ago   919MB
 centos        7         eeb6ee3f44bd   18 months ago    204MB
 ```
 
+#### 3.4.5 Docker微服务实战
+
+（1）将在IDEA上的项目使用maven打成jar包，并上传至linux服务器
+
+（2）编写Dockerfile，需要注意的是，新上传的jar包需要和Dockerfile在同一个目录下
+
+```dockerfile
+# 基础镜像使用Java
+FROM java:8
+# 作者信息
+MAINTAINER progZhou
+
+# VOLUME指定临时文件目录为/tmp, 在主机docker的安装目录下创建一个临时文件
+# 并链接到容器的/tmp目录
+# VOLUME指令的作用是默认自动创建一个容器挂载，防止用户忘记使用-v参数，可以被docker run的-v参数覆盖
+VOLUME /tmp
+
+# 将jar包添加到容器中并更名为progZhou_docker.jar
+ADD docker_boot-0.0.1-SNAPSHOT.jar progZhou_docker.har
+
+# 运行jar包
+RUN bash -c 'touch /progZou_docker.jar'
+
+ENTRYPOINT ["java", "-jar", "progZhou_docker.jar"]
+
+# 暴露6001端口作为微服务
+EXPOSE 6001 
+```
+
+### 3.5 Docker网络
+
+Docker启动之后，如果在linux本机上使用ifconfig命令去查询服务器的ip，会出现docker0的虚拟网桥
+
+<img src="Docker.assets/image-20230328093251300.png" alt="image-20230328093251300" style="zoom:80%;" />
+
+
+
+在安装docker的时候，会默认创建3大网络模式，可以使用`docker network ls`命令查看
+
+```
+[root@ springboot-docker]# docker network ls
+NETWORK ID     NAME      DRIVER    SCOPE
+2a20ee13fe1f   bridge    bridge    local
+79f9b4ab7b92   host      host      local
+be176a235792   none      null      local
+```
+
+#### 3.5.1 Docker网络的常用命令
+
+Docker网络的命令只有`docker network`下的命令，可以使用`docker network --help`查看
+
+```
+[root@ springboot-docker]# docker network --help
+
+Usage:  docker network COMMAND
+
+Manage networks
+
+Commands:
+  connect     Connect a container to a network
+  create      Create a network
+  disconnect  Disconnect a container from a network
+  inspect     Display detailed information on one or more networks
+  ls          List networks
+  prune       Remove all unused networks
+  rm          Remove one or more networks
+```
+
+#### 3.5.2 Docker网络的作用
+
++ 容器间的互联和通信以及端口映射
++ 容器ip变动时可以通过服务名直接网络通信而不受影响（docker集群中docker之间容器的访问）
+
+<img src="Docker.assets/image-20230328095038068.png" alt="image-20230328095038068" style="zoom:80%;" />
+
+#### 3.5.3 Docker的网络模式
+
+| 网络模式    | 简介                                                         |
+| ----------- | ------------------------------------------------------------ |
+| `bridge`    | 为每一个容器分配、设置ip等，并将容器连接到一个docker0的虚拟网桥，默认就是这个模式 |
+| `host`      | 容器将不会虚拟出自己的网卡，配置自己的ip，而是使用宿主机的ip和端口 |
+| `none`      | 容器有独立的Network namespace，但并没有对其进行任何网络设置，一般不会用 |
+| `container` | 新创建的容器不会创建自己的网卡和配置自己的ip，而是和一个指定的容器共享ip、端口等 |
+
++ bridge模式：使用--network bridge指定，默认使用docker0
++ host模式：使用--network host指定
++ none模式：使用--network none指定
++ container模式：使用-network container:NAME或容器id指定
+
+查看正常启动时的docker网络，首先启动两个ubuntu容器，分别命名为u1，u2，然后通过docker inspect查询容器的网络设置
+
+```
+[root@ docker]# docker inspect u1 | tail -n 20
+            "Networks": {
+                "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "NetworkID": "2a20ee13fe1fcba4e90300223fbfa7319f8539c43362dd933075174718438485",
+                    "EndpointID": "8abebdc06caeb5018241c9d26453e7ee228b8d4bf3535942bda1ca46f21745f1",
+                    "Gateway": "172.17.0.1",
+                    ["IPAddress": "172.17.0.2",]  #####docker内网络ip
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "MacAddress": "02:42:ac:11:00:02",
+                    "DriverOpts": null
+                }
+            }
+        }
+    }
+]
+[root@ docker]# docker inspect u2 | tail -n 20
+            "Networks": {
+                "bridge": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "NetworkID": "2a20ee13fe1fcba4e90300223fbfa7319f8539c43362dd933075174718438485",
+                    "EndpointID": "4a4b069f08bc1db201238336b106af76d57f4f850d83ba840c35c199e12af61a",
+                    "Gateway": "172.17.0.1",
+                    ["IPAddress": "172.17.0.3",]  ######docker内网络ip 
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "MacAddress": "02:42:ac:11:00:03",
+                    "DriverOpts": null
+                }
+            }
+        }
+    }
+]
+```
+
+之后再停止u2容器并启动一个新的u3容器，再通过docker inspect 查看u3容器的网络情况，发现u3的网络ip与u2的相同
+
+<img src="Docker.assets/image-20230328100901290.png" alt="image-20230328100901290" style="zoom:80%;" />
+
+由此得出结论：**docker容器内部ip是有可能发生变化的**
+
+
+
+**bridge网络模式**
+
+Docker服务默认会创建一个docker0网桥（其上有一个docker0内部接口），该桥接网络的名称为docker0，它在`内核层`连通了其他的物理或虚拟网卡，这就将所有容器和本地主机都放到`同一物理网络`。Docker默认指定了docker0接口的ip地址和子网掩码，让`主机和容器之间可以通过网桥相互通信`
+
+Docker使用Linux桥接，在宿主机虚拟一个Docker容器网桥（docker0），Docker启动一个容器时会根据Docker网桥的网段分配给容器一个IP地址，成为Container-IP，同时Docker网桥是每个容器默认的网关。因为在同一宿主机内的容器都接入同一个网桥，这样容器之间就能够通过容器的Container-IP直接通信
+
+docker run的时候，没有指定network的话默认使用的网桥模式就是bridge，使用的就是docker0
+
+网桥docker0创建`一对对等虚拟设备接口`，一个叫veth，另一个叫eth0，成对匹配
+
++ 整个宿主机的网桥模式都是docker0，类似一个交换机有一堆接口，每个接口都叫veth，在本地主机和容器内分别创建一个虚拟接口，并让他们彼此联通
++ 每个容器实例内也有一块网卡，每个接口叫eth0
++ dockers0上面的每个veth0匹配某个容器实例内部的eth0，两两配对，一一匹配
+
+通过上述过程，将宿主机上的所有容器都连接到这个内部网络上，两个容器在同一个网络下，会从这个网关下各自拿到分配的ip，此时两个容器的网络是互通的
+
+<img src="Docker.assets/image-20230329092920424.png" alt="image-20230329092920424" style="zoom:80%;" />
+
+启动两个tomcat容器：
+
+```
+docker run -d -p 8088:8080 --name tomcat88 tomcat
+docker run -d -p 8089:8080 --name tomcat89 tomcat
+```
+
+<img src="Docker.assets/image-20230329094713694.png" alt="image-20230329094713694" style="zoom:80%;" />
+
+
+
+**host模式**
+
+直接使用宿主机的ip地址与外界通信，不再需要额外进行NAT转换
+
+容器将不会获得一个独立的Network Namespace，而是和宿主机共用一个Network Namespace，容器将不会虚拟出自己的网卡而是使用宿主机的IP和端口
+
+<img src="Docker.assets/image-20230329095304919.png" alt="image-20230329095304919" style="zoom:80%;" />
+
+以host模式启动一个tomcat容器
+
+```
+docker run -d --network host --name tomcat83 tomcat
+```
+
+查看宿主机和容器内部的网络情况，会发现都是一样的，再通过docker inspect查看容器内部的网络详情，该容器是没有自己的网关和ip的
+
+<img src="Docker.assets/image-20230329100238535.png" alt="image-20230329100238535" style="zoom:80%;" />
+
+**container模式**
+
+新建的容器和已经存在的一个容器共享一个网络ip配置，而不是和宿主机共享，新创建的容器不会创建自己的网卡，配置自己的ip，而是和一个指定的容器共享ip、端口范围等，同样，两个容器除了网络方面，其他的如文件系统，进程列表等还是隔离的
+
+<img src="Docker.assets/image-20230329100953487.png" alt="image-20230329100953487" style="zoom:80%;" />
+
+当被公用的container1关闭之后，container2就没有公用的网卡，只有回环地址localhost了
+
+**自定义网络**
+
+在使用自定义网络之前（使用默认的docker bridge模式），docker容器之间相互之间可以通过ip地址进行互联互通，在一个容器内使用`ping 容器ip`能够ping通另一个容器，但是不能使用`ping 容器name`的形式通信
+
+<img src="Docker.assets/image-20230329101601459.png" alt="image-20230329101601459" style="zoom:80%;" />
+
+但之前也演示过，当容器宕机再启动新的容器时，容器的ip是会改变的，所以，在通信时，并不能写死容器的ip，所以需要使用自定义网络
+
+自定义的驱动模式也是默认的bridge模式
+
+```
+[root@Z ~]# docker network create progZhou_network
+b7aab57516938ac8000fa663c8cf15d0e81ffecad4d008bf40aae3d3ddfb52bf
+[root@ ~]# docker network ls
+NETWORK ID     NAME               DRIVER    SCOPE
+2a20ee13fe1f   bridge             bridge    local
+79f9b4ab7b92   host               host      local
+be176a235792   none               null      local
+b7aab5751693   progZhou_network   bridge    local
+```
+
+之后启动容器时，需要使用自定义网络进行启动
+
+```
+docker run -d -p 8080:8081 --network progZhou_network --name tomcat81 tomcat
+docker run -d -p 8080:8082 --network progZhou_network --name tomcat82 tomcat
+```
+
+之后再使用`ping 容器name`时，就能够ping通了
+
+<img src="Docker.assets/image-20230329102129703.png" alt="image-20230329102129703" style="zoom:80%;" />
