@@ -1961,3 +1961,181 @@ docker run -d -p 8080:8082 --network progZhou_network --name tomcat82 tomcat
 之后再使用`ping 容器name`时，就能够ping通了
 
 <img src="Docker.assets/image-20230329102129703.png" alt="image-20230329102129703" style="zoom:80%;" />
+
+### 3.6 Docker Compose容器编排
+
+#### 3.6.1 Docker Compose简介
+
+Docker Compose是Docker官方的开源项目，负责实现对**Docker容器集群**的快速编排
+
+Docker Compose需要定义一个Yaml格式的配置文件`docker-compose.yml`，**写好多个容器之间的调用关系**，然后，只要一个命令，就能**同时启动或者关闭**这些容器
+
+> Docker Compose可以与Spring容器做对比，当Spring中的bean逐渐增加时，需要进行统一的管理，在Spring中就是`application-Context.xml`文件
+>
+> ```xml
+> <bean id="" class=""></bean>
+> <bean id="" class=""></bean>
+> <bean id="" class=""></bean>
+> <bean id="" class=""></bean>
+> ...
+> ```
+>
+> 而Docker与之类似，当容器实例增加时，也需要使用`docker-compose.yml`进行管理，对多个容器实例进行一键启动或者一键关闭
+
+以web微服务为例，如果要实现一个web微服务项目，除了web服务容器本身，往往还需要再加上后端的数据库mysql容器，redis容器，注册中心甚至还要包括负载均衡器等等
+
+Compose允许用户通过一个单独的`docker-compose.yml`模板文件来定义一组相关联的应用容器作为一个项目，可以很容易地用一个配置文件定义一个多容器的应用，然后使用一条指令安装这个应用的所有依赖，完成构建，Docker-Compose解决了**容器与容器之间如何管理编排的问题**
+
+#### 3.6.2 Compose的核心概念
+
++ 一文件：`docker-compose.yml`
+
++ 两要素
+
+  + 服务（service）：一个个应用容器实例，比如订单微服务、库存微服务、mysql容器、nginx容器或者redis容器
+  + 工程（project）：由一组关联的应用容器组成的一个完成业务单元，在`docker-compose.yml`文件中定义
+
+  一个工程 = 多个服务（容器实例）
+
+<img src="Docker.assets/image-20230330100242428.png" alt="image-20230330100242428" style="zoom:80%;" />
+
+Docker Compose使用步骤：
+
++ （1）编写Dockerfile定义各个微服务应用并构建出对应的镜像文件
++ （2）使用docker-compose.yml定义一个完成业务单元，安排好整体应用中的各个容器服务
++ （3）最后，执行docker-compose up命令，来启动并运行整个应用程序，完成一键部署上线
+
+#### 3.6.3 Docker Compose微服务实战
+
+首先将之前使用过的docker_boot服务升级，用上mysql和redis，再编写Dockerfile生成镜像文件（可以使用之前的Dockerfile，没什么区别）
+
+```dockerfile
+# 基础镜像使用Java
+FROM java:8
+# 作者信息
+MAINTAINER progZhou
+
+# VOLUME指定临时文件目录为/tmp, 在主机docker的安装目录下创建一个临时文件
+# 并链接到容器的/tmp目录
+# VOLUME指令的作用是默认自动创建一个容器挂载，防止用户忘记使用-v参数，可以被docker run的-v参数覆盖
+VOLUME /tmp
+
+# 将jar包添加到容器中并更名为progZhou_docker.jar
+ADD docker_boot-0.0.1-SNAPSHOT.jar progZhou_docker.har
+
+# 运行jar包
+RUN bash -c 'touch /progZou_docker.jar'
+
+ENTRYPOINT ["java", "-jar", "progZhou_docker.jar"]
+
+# 暴露6001端口作为微服务
+EXPOSE 6001 
+```
+
+然后执行docker build生成新镜像，此时我们做一个对比，首先不使用compose来进行容器的编排
+
+**（1）不使用Compose**
+
++ 首先需要单独启动一个mysql容器，并新建数据表和插入数据
+
+  ```
+  docker run -d -p 3306:3306 --privileged=true 
+  -v /usr/local/docker/mysql/log:/var/log/mysql   
+  -v /usr/local/docker/mysql/data:/var/lib/mysql  
+  -v /usr/local/docker/mysql/conf:/etc/mysql/conf.d   
+  --name some-mysql -e MYSQL_ROOT_PASSWORD=docker123456 mysql:8.0.26
+  
+  docker exec -it some-mysql bash
+  root@ /: mysql -uroot -p123456
+  mysql> create database xxx
+  mysql> create table xxx
+  mysql> ...
+  ```
+
++ 再单独启动一个redis容器
+
+  ```
+  docker run -p 6379:6379 --name some-redis --privileged=true 
+  -v /usr/local/docker/redis/redis.conf:/etc/redis/redis.conf
+  -v /usr/local/docker/redis/data:/data
+  -d redis:6.2.4 redis-server /etc/redis/redis.conf
+  ```
+
++ 最后将微服务镜像启动
+
+  ```
+  docker run -d -p 6001:6001 containerID
+  ```
+
+> 不使用Compose存在的问题：
+>
+> （1）每个容器启动的顺序固定，上面的案例中，必须先启动mysql + redis，再启动微服务实例
+>
+> （2）需要执行多个docker run命令，如果微服务个数庞大，很麻烦
+>
+> （3）容器间的启动、宕机有可能导致容器的ip地址变化，映射出错，容错性不高
+
+**（2）使用Compose**
+
++ 首先编写docker-compose.yml文件，需要与Dockerfile和jar包在同一目录下
+
+  ```yaml
+  version: "3"   ##docker compose版本
+  services:   ##需要启动几个容器
+    microService:  ##可随意，不能重复
+      image: progZhou_docker:1.6  ## 微服务镜像名称
+      container_name: ms01   ##容器名称
+      ports:
+        - "6001:6001"
+      volumes: 
+        - /app/microService:/data
+      networks:
+        - progZhou_network
+      depends_on:   ##当前微服务需要依赖于Mysql和redis的启动
+        - redis
+        - mysql
+  ## 转换以下其实就是docker run -d -p 6001:6001 -v /app/microService:/data --network progZhou_network --name ms01      
+    
+    redis:
+      image: redis:6.2.8
+      ports:
+        - "6379:6379"
+      volumes: 
+        - /app/redis/redis.conf:/etc/redis/redis.conf
+        - /app/redis/data:/data
+      networks:
+        - progZhou_network
+      command: redis-server /etc/redis/redis.conf
+    
+    mysql: 
+      image: mysql:8.2.6
+      environment:
+        MYSQL_ROOT_PASSWORD: '123456'
+        MYSQL_ALLOW_EMPTY_PASSWORD: 'no'
+        MYSQL_DATABASE: 'db2021'
+        MYSQL_USER: 'progZhou'
+        MYSQL_PASSWORD: 'progZhou123'
+     ports:
+       - "3306:3306"
+     volumes:
+       - /app/mysql/db:/var/lib/mysql
+       - /app/mysql/conf/my.cnf:/etc/my.cnf
+       - /app/mysql/init:/docker-entrypoint-initdb.d
+     networks:
+       - progZhou_network
+     command: --default-authentication-plugin=mysql_native_password
+     
+  networks:
+    progZhou_network
+  ```
+
++ 修改docker_boot微服务，将yml中的IP地址修改为docker中的服务名称，并重新打包，上传至linux服务器
+
+  <img src="Docker.assets/image-20230330105526289.png" alt="image-20230330105526289" style="zoom:80%;" />
+
++ 执行`docker-compose up -d`一键部署微服务（可以在up之前使用`docker-compose config -q`查看编写的yml是否有语法错误）
+
++ 然后进入mysql容器，创建数据库和表
+
++ 如果要关停容器，可以使用`docker-compose stop`一键关停
+
