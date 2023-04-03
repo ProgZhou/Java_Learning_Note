@@ -2133,9 +2133,134 @@ EXPOSE 6001
 
   <img src="Docker.assets/image-20230330105526289.png" alt="image-20230330105526289" style="zoom:80%;" />
 
-+ 执行`docker-compose up -d`一键部署微服务（可以在up之前使用`docker-compose config -q`查看编写的yml是否有语法错误）
++ 执行`docker compose up -d`一键部署微服务（可以在up之前使用`docker compose config -q`查看编写的yml是否有语法错误）
 
 + 然后进入mysql容器，创建数据库和表
 
-+ 如果要关停容器，可以使用`docker-compose stop`一键关停
++ 如果要关停容器，可以使用`docker compose stop`一键关停
+
+### 3.7 Docker可视化工具Portainer
+
+Portainer是一款轻量级的应用，它提供了图形化界面，用于方便地管理Docker环境，包括单机环境和集群环境
+
+#### 3.7.1 Docker Portainer的安装
+
+https://www.portainer.io/官网
+
+portainer也是一个容器，需要跑在docker上，直接执行docker run命令即可
+
+```
+docker run -d -p 8000:8000 -p 9000:9000 --name portainer --restart=always \
+-v /var/run/docker.sock:/var/run/docker.sock \
+-v /usr/local/docker/portainer/data:/data  portainer/portainer
+```
+
+安装完成之后即可访问，访问地址为linux服务器ip:9000，第一次访问时，需要创建一个admin用户，密码8位自拟
+
+<img src="Docker.assets/image-20230403094619262.png" alt="image-20230403094619262" style="zoom:80%;" />
+
+选择本地docker进行连接，进入后即可看到本地docker的详细信息：
+
+<img src="Docker.assets/image-20230403095026765.png" alt="image-20230403095026765" style="zoom:80%;" />
+
+在portainer界面即可对docker进行操作，包括常用的拉取镜像、启动容器等
+
+### 3.8 Docker容器监控
+
+docker中自带的监控容器的命令是`docker stats`，它能够显示docker容器运行时的详细数据
+
+<img src="Docker.assets/image-20230403100042455.png" alt="image-20230403100042455" style="zoom:80%;" />
+
+docker stats命令可以很方便地看到当前宿主机上所有容器CPU、内存以及网络流量等数据，但是docker stats停机结果只能是当前宿主机的全部容器，数据资料是实时的，没有地方存储，没有健康指标过线预警等功能
+
+#### 3.8.1 CAdvisor
+
+CAdvisor是一个容器资源监控工具，包括容器的内存、CPU、网络IO、磁盘IO等监控，同时提供了一个web页面用于查看容器的实时运行状态。CAdvisor提供了很多数据集成接口，支持InfluxDB，Redis，Kafka，Elasticsearch等集成，可以加上对应配置将监控数据发往这些数据库存储起来
+
+CAdvisor功能主要有两点：
+
++ 展示Host和容器两个层次的监控数据
++ 展示历史变化数据
+
+#### 3.8.2 InfluxDB
+
+InfluxDB是用Go语言编写的一个开源分布式时序、事件和指标数据库，无需外部依赖
+
+CAdvisor默认只在本机保存最近两分钟的数据，为了持久化存储数据和统一收集展示监控数据，需要将数据存储到InfluxDB中。InfluxDB是一个时许数据库，专门用于存储时许相关数据，很适合存储CAdvisor的数据，而且，CAdvisor本身已经提供了InfluxDB的集成方法，在启动容器时指定配置即可
+
+InfluxDB主要功能：
+
++ 基于时间序列，支持与时间有关的相关函数
++ 可度量性：你可以实时对大量数据进行计算
++ 基于事件：它支持任意的事件数据
+
+#### 3.8.3 Grafana
+
+Grafana是一个开源的数据监控分析可视化平台，支持多种数据源配置，包括InfluxDB，MySQL，Elasticsearch等和丰富的插件及模板功能，支持图表权限控制和报警
+
+Grafan主要特性：
+
++ 灵活丰富的图形化选项
++ 可以混合多种风格
++ 支持白天和夜间模式
++ 多个数据源
+
+#### 3.8.4 Compose编排CIG
+
+在docker目录下新建cig目录，并创建docker-compose.yml文件
+
+```yaml
+version: '3.1'
+
+volumes:
+  grafana_data: {}
+  
+services:
+  influxdb:
+    image: tutum/influxdb:0.9
+    restart: always
+    environment: 
+      - PRE_CREATE_DB=cadvisor
+    ports:
+      - "8083:8083"
+      - "8086:8086"
+    volumes:
+      - ./data/influxdb:/data
+      
+  cadvisor:
+    image: google/cadvisor
+    links:
+      - influxdb:influxsrv
+    command: 
+      - storage_driver=influxdb 
+      - storage_driver_db=cadvisor 
+      - storage_driver_host=influxsrv:8086
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+  
+  grafana:
+    user: "104"
+    image: grafana/grafana
+    user: "104"
+    restart: always
+    links:
+      - influxdb:influxsrv
+    ports: 
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - HTTP_USER=admin
+      - HTTP_PASS=admin
+      - INFLUXDB_HOST=influxsrv
+      - INFLUXDB_PORT=8086
+      - INFLUXDB_NAME=cadvisor
+      - INFLUXDB_USER=root	
+```
 
