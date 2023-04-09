@@ -2742,6 +2742,7 @@ public class PipelineTest {
                             public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception{
                                 log.debug("input data3...");
                                 super.channelRead(ctx , msg);
+                                //只有向channel中写数据时才会触发后续的出战处理器
                                 nioSocketChannel.writeAndFlush(ctx.alloc().buffer().writeBytes("123".getBytes(StandardCharsets.UTF_8)));
 
                             }
@@ -2775,7 +2776,7 @@ public class PipelineTest {
                             }
                         });
                         
-                        //再添加三个出站处理器之后，pipeline的处理链：
+                        //再添加三个出站处理器之后，pipeline的处理链：出战处理器的执行顺序是从tail向前，也就是h6 h5 h4
                         //head <-> h1 <-> h2 <-> h3 <-> h4 <-> h5 <-> h6 <-> tail
                      }
 
@@ -2794,3 +2795,275 @@ public class PipelineTest {
 20:19:51.274 [nioEventLoopGroup-2-2] DEBUG com.java.netty.demo01.nettybasic.net3.PipelineTest - output data5...
 20:19:51.274 [nioEventLoopGroup-2-2] DEBUG com.java.netty.demo01.nettybasic.net3.PipelineTest - output data4...
 ```
+
+> 这种入站处理器可以将接收到的数据经过多个步骤的处理，最终得到服务器想要的数据，其中`super.channelRead(ctx , msg);`是将当前handler处理完的数据（msg）传送给下一个handler，如果不写，就不会触发后续入站handler的操作
+>
+> 出战处理器的执行顺序，当handler调用`channel.write()`时会触发一个出战处理器，`channel.write()`会从tail尾部开始向前查找出战处理器
+>
+> <img src="Netty.assets/image-20230409094806568.png" alt="image-20230409094806568" style="zoom:80%;" />
+
+### 2.6 ByteBuf
+
+ByteBuf是Netty中对普通的ByteBuffer做的增强，功能与ByteBuffer类似，但更强大
+
+**ByteBuf的创建**
+
+```java
+public class ByteBufTest1 {
+    public static void main(String[] args) {
+
+        //1. 创建ByteBuf，Netty中的ByteBuf可以动态扩容
+        ByteBuf buf = ByteBufAllocator.DEFAULT.buffer();  //可以指定容量，也可以不指定容量，默认为256字节
+        //2. 测试ByteBuf的动态扩容
+//        log.info("{}", buf);
+        log(buf);
+        StringBuilder sb = new StringBuilder();
+        for(int i = 0; i < 300; i++) {   //默认的bytebuf容量是256
+            sb.append("a");
+        }
+        buf.writeBytes(sb.toString().getBytes(StandardCharsets.UTF_8));
+//        log.info("{}", buf);
+        log(buf);
+    }
+
+    /**
+     * 调试方法，打印ByteBuf中的具体情况
+     * @param buffer
+     */
+    private static void log(ByteBuf buffer) {
+        int length = buffer.readableBytes();
+        int rows = length / 16 + (length % 15 == 0 ? 0 : 1) + 4;
+        StringBuilder buf = new StringBuilder(rows * 80 * 2)
+                .append("read index:").append(buffer.readerIndex())
+                .append(" write index:").append(buffer.writerIndex())
+                .append(" capacity:").append(buffer.capacity())
+                .append(NEWLINE);
+        appendPrettyHexDump(buf, buffer);
+        System.out.println(buf.toString());
+    }
+}
+输出：
+read index:0 write index:0 capacity:256   //初始容量
+
+read index:0 write index:300 capacity:512  //动态扩容为512
+```
+
+#### 2.6.1 ByteBuf的优点
+
+**直接内存和堆内存**
+
+ByteBuf支持创建基于堆内存的ByteBuf，也支持基于直接内存的ByteBuf
+
+```java
+ByteBuf buffer = ByteBufAllocator.DEFAULT.heapBuffer(10);
+
+ByteBuf buffer = ByteBufAllocator.DEFAULT.directBuffer(10);
+```
+
++ 直接内存创建和销毁的代价比较昂贵，但是读写性能高，可以减少一次数据从直接内存到Java内存的复制，适合配合池化功能一起使用
++ 直接内存对GC压力小，因为这部分内存不受JVM垃圾回收的管理，但也要注意及时主动释放
++ ByteBuf默认使用的就是直接内存
+
+**池化**
+
+池化的功能可以重用ByteBuf，类似于数据库连接池
+
++ 如果没有池化的功能，每次都得创建新的ByteBuf实例，这个操作对直接内存代价昂贵，就算是堆内存，也会增加GC压力
++ 有了池化功能，则可以重用池中ByteBuf的实例，并且采取了与jemalloc类似的内存分配算法提升分配效率
++ 高并发时，池化功能更节约内存资源，减少内存溢出的可能
+
+池化功能是否开启可以通过系统环境变量进行设置：`-Dio.netty.allocator.type=unpooled | pooled`
+
+> nett4.1之后，非Android平台默认启用池化实现，Android平台启用非池化实现
+>
+> netty4.2之前，池化功能还不成熟，默认是非池化的实现
+
+#### 2.6.2 ByteBuf的组成
+
+ByteBuf由四部分组成：
+
++ 废弃字节：已经读取完成的部分
++ 可读字节：位于读指针与写指针之间的字节
++ 可写字节：位于写指针与指定容量之间的空余部分
++ 可扩容字节：位于指定容量与最大容量之间的部分
+
+<img src="Netty.assets/image-20230409101832470.png" alt="image-20230409101832470" style="zoom:80%;" />
+
+> 相比于传统的ByteBuffer，ByteBuf将读指针与写指针分开，不需要再进行指针模式的切换即可进行读写操作
+
+#### 2.6.3 ByteBuf的常用方法
+
+**写入方法**
+
+
+
+| 方法签名                                                     | 含义                   | 备注                                   |
+| ------------------------------------------------------------ | ---------------------- | -------------------------------------- |
+| `writeBoolean(boolean value)`                                | 写入 boolean 值        | 用一字节 01\|00 代表 true\|false       |
+| `writeByte(int value)`                                       | 写入 byte 值           |                                        |
+| `writeShort(int value)`                                      | 写入 short 值          |                                        |
+| `writeInt(int value)`                                        | 写入 int 值            | 大端写入，即 0x250，写入后 00 00 02 50 |
+| `writeIntLE(int value)`                                      | 写入 int 值            | 小端写入，即 0x250，写入后 50 02 00 00 |
+| `writeLong(long value)`                                      | 写入 long 值           |                                        |
+| `writeChar(int value)`                                       | 写入 char 值           |                                        |
+| `writeFloat(float value)`                                    | 写入 float 值          |                                        |
+| `writeDouble(double value)`                                  | 写入 double 值         |                                        |
+| `writeBytes(ByteBuf src)`                                    | 写入 netty 的 ByteBuf  |                                        |
+| `writeBytes(byte[] src)`                                     | 写入 byte[]            |                                        |
+| `writeBytes(ByteBuffer src)`                                 | 写入 nio 的 ByteBuffer |                                        |
+| `int writeCharSequence(CharSequence sequence, Charset charset)` | 写入字符串             |                                        |
+
+> 方法基本都返回ByteBuf
+
+测试代码：
+
+```java
+public void testMethod() {
+    //指定10个字节的ByteBuf
+    ByteBuf buf = ByteBufAllocator.DEFAULT.buffer(10);
+
+    //写入字节数组
+    buf.writeBytes(new byte[]{1, 2, 3, 4});
+    log(buf);
+
+    //写入整型，4个字节，大端写入
+    buf.writeInt(5);
+    log(buf);
+}
+输出：
+read index:0 write index:4 capacity:10
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 01 02 03 04                                     |....            |
++--------+-------------------------------------------------+----------------+
+read index:0 write index:8 capacity:10
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 01 02 03 04 00 00 00 05                         |........        |   //采用大端写入的方式
++--------+-------------------------------------------------+----------------+
+```
+
+**扩容**
+
+如果在上面的基础上再写入一个int类型的数据，则会触发ByteBuf的扩容
+
+```java
+buf.writeInt(6);
+log(buf);
+
+输出：
+read index:0 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 01 02 03 04 00 00 00 05 00 00 00 06             |............    |
++--------+-------------------------------------------------+----------------+
+```
+
+ByteBuf的扩容规则：
+
++ 如果写入后数据的大小没有超过512个字节，则选择*下一个16的整数倍*为新buf的容量大小，比如上面写入6之后，大小为12个字节，则扩容为16；如果写入后大小为17个字节，则扩容为32，以此类推
++ 如果写入后的数据大小超过了512个字节，则选择下一个2^n作为buf的大小，比如在写入数据之后大小为520个字节，则会将buf扩容为2^10 = 1024个字节
++ 扩容之后的大小如果超过了max capacity（默认为2^64，可以在创建ByteBuf时指定）会报错
+
+**读取**
+
+读取的方法就是`readxxx()`，根据不同的读取数据类型进行读取即可
+
+```java
+    public void testMethod() {
+        //指定10个字节的ByteBuf
+        ByteBuf buf = ByteBufAllocator.DEFAULT.buffer(10);
+
+        //写入字节数组
+        buf.writeBytes(new byte[]{1, 2, 3, 4});
+//        log(buf);
+
+        //写入整型，4个字节，大端写入
+        buf.writeInt(5);
+//        log(buf);
+
+        buf.writeInt(6);
+//        log(buf);
+
+        System.out.println(buf.readByte());
+        System.out.println(buf.readByte());
+        System.out.println(buf.readByte());
+        System.out.println(buf.readByte());
+        log(buf);
+    }
+
+输出：
+1
+2
+3
+4
+read index:4 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 00 00 00 05 00 00 00 06                         |........        |   //读取完的字节就会成为废弃字节
++--------+-------------------------------------------------+----------------+
+```
+
+如果需要重复读取某一数据（比如示例中的5）可以通过mark标记读指针位置，再进行reset
+
+```java
+buf.markReaderIndex();
+System.out.println(buf.readInt());
+log(buf);
+buf.resetReaderIndex();
+System.out.println(buf.readInt());
+log(buf);
+
+输出：
+5
+read index:8 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 00 00 00 06                                     |....            |
++--------+-------------------------------------------------+----------------+
+5
+read index:8 write index:12 capacity:16
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 00 00 00 06                                     |....            |
++--------+-------------------------------------------------+----------------+
+```
+
+ByteBuf还有一些列的get开头的API，不会改变读指针的位置就会将数据读出来
+
+#### 2.6.4 ByteBuf的内存回收
+
+由于Netty中有堆外内存的ByteBuf实现，堆外内存最好是手动释放，而不是等GC垃圾回收
+
++ `UnpooledHeapByteBuf` 使用的是 JVM 内存，只需等 GC 回收内存即可
++ `UnpooledDirectByteBuf` 使用的就是直接内存了，需要特殊的方法来回收内存
++ `PooledByteBuf` 和它的子类使用了池化机制，需要更复杂的规则来回收内存
+
+不同的ByteBuf的实现会有不同的回收方法
+
+Netty采用了引用计数法来控制回收内存，每个ByteBuf都实现了ReferenceCounted接口
+
++ 每个 ByteBuf 对象的初始计数为 1
++ 调用 release 方法计数减 1，如果计数为 0，ByteBuf 内存被回收
++ 调用 retain 方法计数加 1，表示调用者没用完之前，其它 handler 即使调用了 release 也不会造成回收
++ 当计数为 0 时，底层内存会被回收，这时即使 ByteBuf 对象还在，其各个方法均无法正常使用
+
+ByteBuf的release：在Netty中，由于有Pipeline的存在，一般需要将ByteBuf传递给下一个handler进行处理，所以不能进行一般的`try - finally`处理，基本规则就是，**谁最后使用了ByteBuf，谁负责进行release**
+
+Netty中的pipeline默认有head和tail两个handler节点，这两个节点最终会处理传递到他们那里的未被释放的ByteBuf，但是我们仍然需要在最后使用ByteBuf的handler中释放ByteBuf，因为在对ByteBuf进行处理之后，可能传输给下一个handler的数据就不是ByteBuf了，有可能是字符串或者其他类型，这样head和tail就不会释放ByteBuf
+
+* 入站 ByteBuf 处理原则
+  * 对原始 ByteBuf 不做处理，调用 ctx.fireChannelRead(msg) 向后传递，这时无须 release
+  * 将原始 ByteBuf 转换为其它类型的 Java 对象，这时 ByteBuf 就没用了，必须 release
+  * 如果不调用 ctx.fireChannelRead(msg) 向后传递，那么也必须 release
+  * 注意各种异常，如果 ByteBuf 没有成功传递到下一个 ChannelHandler，必须 release
+  * 假设消息一直向后传，那么 TailContext 会负责释放未处理消息（原始的 ByteBuf）
+* 出站 ByteBuf 处理原则
+  * 出站消息最终都会转为 ByteBuf 输出，一直向前传，由 HeadContext flush 后 release
+
