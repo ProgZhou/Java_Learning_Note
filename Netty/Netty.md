@@ -3752,3 +3752,270 @@ public class LengthFieldDecoderTest {
 +--------+-------------------------------------------------+----------------+
 11:18:08.804 [main] DEBUG io.netty.handler.logging.LoggingHandler - [id: 0xembedded, L:embedded - R:embedded] READ COMPLETE
 ```
+
+### 3.2 协议的解析与设计
+
+协议是服务器与客户端相互通信的一个规则，以redis为例，在客户端发送一条命令，比如`set name zhangsan`，需要按照这样的结构发送：
+
+```
+*3   //表示整条命令元素的个数，set/name/zhangsan 为3
+/r/n   //回车换行作为分隔
+$3     //每一个元素的长度
+set    //每一个元素的内容
+/r/n
+$4
+name
+/r/n
+$8
+zhangsan
+```
+
+可以通过编写代码来模拟客户端向服务器发送数据：
+
+```java
+@Slf4j
+public class RedisProtocolTest {
+
+    public static void main(String[] args) {
+        NioEventLoopGroup worker = new NioEventLoopGroup();
+        final byte[] LINE = {13, 10};
+        try {
+            Bootstrap bootstrap = new Bootstrap();
+            bootstrap.channel(NioSocketChannel.class);
+            bootstrap.group(worker);
+            bootstrap.handler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) throws Exception {
+                    ch.pipeline().addLast(new LoggingHandler());
+                    ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                        @Override
+                        public void channelActive(ChannelHandlerContext ctx) throws Exception {
+                            ByteBuf buffer = ctx.alloc().buffer();
+                            buffer.writeBytes("*3".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            buffer.writeBytes("$3".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            buffer.writeBytes("set".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            buffer.writeBytes("$4".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            buffer.writeBytes("name".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            buffer.writeBytes("$8".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            buffer.writeBytes("zhangsan".getBytes());
+                            //每一条命令之间需要通过回车换行来区分
+                            buffer.writeBytes(LINE);
+
+                            ctx.writeAndFlush(buffer);
+                        }
+
+                        @Override
+                        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                            ByteBuf buf = (ByteBuf) msg;
+                            log.info("{}", buf.toString(StandardCharsets.UTF_8));
+                        }
+                    });
+                }
+            });
+            ChannelFuture channelFuture = bootstrap.connect("localhost", 6379).sync();
+            channelFuture.channel().closeFuture().sync();
+        } catch (InterruptedException e) {
+            log.error("client error", e);
+        } finally {
+            worker.shutdownGracefully();
+        }
+    }
+
+}
+输出：
+10:08:48.740 [nioEventLoopGroup-2-1] DEBUG io.netty.handler.logging.LoggingHandler - [id: 0xe295b881, L:/127.0.0.1:63558 - R:localhost/127.0.0.1:6379] READ: 5B
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 2b 4f 4b 0d 0a                                  |+OK..           |
++--------+-------------------------------------------------+----------------+
+```
+
+再查看redis中，发现已经将`name: zhangsan`保存至redis中了
+
+<img src="Netty.assets/image-20230414100946701.png" alt="image-20230414100946701" style="zoom:80%;" />
+
+#### 3.2.1 http协议
+
+http协议相比于redis的协议就复杂很多，netty中提供有对http协议的编解码器：`HttpServerCodec`，可以通过这个类对http请求进行解析
+
+```java
+@Slf4j
+public class HttpTest {
+
+    public static void main(String[] args) {
+        NioEventLoopGroup boss = new NioEventLoopGroup();
+        NioEventLoopGroup worker = new NioEventLoopGroup();
+
+        try {
+            ServerBootstrap serverBootstrap = new ServerBootstrap();
+            serverBootstrap.channel(NioServerSocketChannel.class);
+            serverBootstrap.group(boss, worker);
+            serverBootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) throws Exception {
+                    ch.pipeline().addLast(new LoggingHandler(LogLevel.DEBUG));
+                    //添加http的编解码器
+                    ch.pipeline().addLast(new HttpServerCodec());
+                    //添加自定义处理器处理经过http编码器之后的结果
+                    ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                        @Override
+                        public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                            //输出经过编解码器之后，解析出来的类型
+                            log.debug("{}", msg.getClass());
+                        }
+                    });
+                }
+            });
+
+            ChannelFuture channelFuture = serverBootstrap.bind(8080).sync();
+            channelFuture.channel().closeFuture().sync();
+        } catch (InterruptedException e) {
+            log.error("server error", e);
+        } finally {
+            boss.shutdownGracefully();
+            worker.shutdownGracefully();
+        }
+    }
+
+}
+
+输出：需要打开浏览器访问http//localhost:8080/hello  后面路径随意
+10:13:57.831 [nioEventLoopGroup-3-1] DEBUG io.netty.handler.logging.LoggingHandler - [id: 0xf04d433c, L:/0:0:0:0:0:0:0:1:8080 - R:/0:0:0:0:0:0:0:1:63808] READ: 662B
+//以下是一些请求的信息，包括请求头、请求体
+         +-------------------------------------------------+
+         |  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f |
++--------+-------------------------------------------------+----------------+
+|00000000| 47 45 54 20 2f 68 65 6c 6c 6f 20 48 54 54 50 2f |GET /hello HTTP/|
+|00000010| 31 2e 31 0d 0a 48 6f 73 74 3a 20 6c 6f 63 61 6c |1.1..Host: local|
+|00000020| 68 6f 73 74 3a 38 30 38 30 0d 0a 43 6f 6e 6e 65 |host:8080..Conne|
+|00000030| 63 74 69 6f 6e 3a 20 6b 65 65 70 2d 61 6c 69 76 |ction: keep-aliv|
+|00000040| 65 0d 0a 73 65 63 2d 63 68 2d 75 61 3a 20 22 4e |e..sec-ch-ua: "N|
+|00000050| 6f 74 3f 41 5f 42 72 61 6e 64 22 3b 76 3d 22 38 |ot?A_Brand";v="8|
+|00000060| 22 2c 20 22 43 68 72 6f 6d 69 75 6d 22 3b 76 3d |", "Chromium";v=|
+|00000070| 22 31 30 38 22 2c 20 22 47 6f 6f 67 6c 65 20 43 |"108", "Google C|
+|00000080| 68 72 6f 6d 65 22 3b 76 3d 22 31 30 38 22 0d 0a |hrome";v="108"..|
+|00000090| 73 65 63 2d 63 68 2d 75 61 2d 6d 6f 62 69 6c 65 |sec-ch-ua-mobile|
+|000000a0| 3a 20 3f 30 0d 0a 73 65 63 2d 63 68 2d 75 61 2d |: ?0..sec-ch-ua-|
+|000000b0| 70 6c 61 74 66 6f 72 6d 3a 20 22 57 69 6e 64 6f |platform: "Windo|
+|000000c0| 77 73 22 0d 0a 55 70 67 72 61 64 65 2d 49 6e 73 |ws"..Upgrade-Ins|
+|000000d0| 65 63 75 72 65 2d 52 65 71 75 65 73 74 73 3a 20 |ecure-Requests: |
+|000000e0| 31 0d 0a 55 73 65 72 2d 41 67 65 6e 74 3a 20 4d |1..User-Agent: M|
+|000000f0| 6f 7a 69 6c 6c 61 2f 35 2e 30 20 28 57 69 6e 64 |ozilla/5.0 (Wind|
+|00000100| 6f 77 73 20 4e 54 20 31 30 2e 30 3b 20 57 69 6e |ows NT 10.0; Win|
+|00000110| 36 34 3b 20 78 36 34 29 20 41 70 70 6c 65 57 65 |64; x64) AppleWe|
+|00000120| 62 4b 69 74 2f 35 33 37 2e 33 36 20 28 4b 48 54 |bKit/537.36 (KHT|
+|00000130| 4d 4c 2c 20 6c 69 6b 65 20 47 65 63 6b 6f 29 20 |ML, like Gecko) |
+|00000140| 43 68 72 6f 6d 65 2f 31 30 38 2e 30 2e 30 2e 30 |Chrome/108.0.0.0|
+|00000150| 20 53 61 66 61 72 69 2f 35 33 37 2e 33 36 0d 0a | Safari/537.36..|
+|00000160| 41 63 63 65 70 74 3a 20 74 65 78 74 2f 68 74 6d |Accept: text/htm|
+|00000170| 6c 2c 61 70 70 6c 69 63 61 74 69 6f 6e 2f 78 68 |l,application/xh|
+|00000180| 74 6d 6c 2b 78 6d 6c 2c 61 70 70 6c 69 63 61 74 |tml+xml,applicat|
+|00000190| 69 6f 6e 2f 78 6d 6c 3b 71 3d 30 2e 39 2c 69 6d |ion/xml;q=0.9,im|
+|000001a0| 61 67 65 2f 61 76 69 66 2c 69 6d 61 67 65 2f 77 |age/avif,image/w|
+|000001b0| 65 62 70 2c 69 6d 61 67 65 2f 61 70 6e 67 2c 2a |ebp,image/apng,*|
+|000001c0| 2f 2a 3b 71 3d 30 2e 38 2c 61 70 70 6c 69 63 61 |/*;q=0.8,applica|
+|000001d0| 74 69 6f 6e 2f 73 69 67 6e 65 64 2d 65 78 63 68 |tion/signed-exch|
+|000001e0| 61 6e 67 65 3b 76 3d 62 33 3b 71 3d 30 2e 39 0d |ange;v=b3;q=0.9.|
+|000001f0| 0a 53 65 63 2d 46 65 74 63 68 2d 53 69 74 65 3a |.Sec-Fetch-Site:|
+|00000200| 20 6e 6f 6e 65 0d 0a 53 65 63 2d 46 65 74 63 68 | none..Sec-Fetch|
+|00000210| 2d 4d 6f 64 65 3a 20 6e 61 76 69 67 61 74 65 0d |-Mode: navigate.|
+|00000220| 0a 53 65 63 2d 46 65 74 63 68 2d 55 73 65 72 3a |.Sec-Fetch-User:|
+|00000230| 20 3f 31 0d 0a 53 65 63 2d 46 65 74 63 68 2d 44 | ?1..Sec-Fetch-D|
+|00000240| 65 73 74 3a 20 64 6f 63 75 6d 65 6e 74 0d 0a 41 |est: document..A|
+|00000250| 63 63 65 70 74 2d 45 6e 63 6f 64 69 6e 67 3a 20 |ccept-Encoding: |
+|00000260| 67 7a 69 70 2c 20 64 65 66 6c 61 74 65 2c 20 62 |gzip, deflate, b|
+|00000270| 72 0d 0a 41 63 63 65 70 74 2d 4c 61 6e 67 75 61 |r..Accept-Langua|
+|00000280| 67 65 3a 20 7a 68 2d 43 4e 2c 7a 68 3b 71 3d 30 |ge: zh-CN,zh;q=0|
+|00000290| 2e 39 0d 0a 0d 0a                               |.9....          |
++--------+-------------------------------------------------+----------------+
+//经过编解码器之后解析出的类型，包括请求头和请求体，如果是get请求，则请求体为空，但是仍然会有这个请求体
+10:13:57.854 [nioEventLoopGroup-3-1] DEBUG com.java.netty.demo01.nettyadvanced.net3.HttpTest - class io.netty.handler.codec.http.DefaultHttpRequest
+10:13:57.854 [nioEventLoopGroup-3-1] DEBUG com.java.netty.demo01.nettyadvanced.net3.HttpTest - class io.netty.handler.codec.http.LastHttpContent$1
+```
+
+基本的http请求处理：
+
+```java
+@Slf4j
+public class HttpTest {
+
+    public static void main(String[] args) {
+        NioEventLoopGroup boss = new NioEventLoopGroup();
+        NioEventLoopGroup worker = new NioEventLoopGroup();
+
+        try {
+            ServerBootstrap serverBootstrap = new ServerBootstrap();
+            serverBootstrap.channel(NioServerSocketChannel.class);
+            serverBootstrap.group(boss, worker);
+            serverBootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) throws Exception {
+                    ch.pipeline().addLast(new LoggingHandler(LogLevel.DEBUG));
+                    //添加http的编解码器
+                    ch.pipeline().addLast(new HttpServerCodec());
+                    //添加自定义处理器处理经过http编码器之后的结果
+                    //可以只关注请求头，专门处理请求头
+                    ch.pipeline().addLast(new SimpleChannelInboundHandler<HttpRequest>() {
+
+                        @Override
+                        protected void channelRead0(ChannelHandlerContext ctx, HttpRequest msg) throws Exception {
+                            log.debug("{}", msg.uri());
+
+                            //返回响应，有最基本的两个参数：协议版本和响应码
+                            byte[] content = "<h1>Hello World</h1>".getBytes();
+                            DefaultFullHttpResponse response =
+                                    new DefaultFullHttpResponse(msg.protocolVersion(), HttpResponseStatus.OK);
+                            //添加响应头
+                            response.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, content.length);
+                            response.content().writeBytes(content);
+
+                            //写回响应
+                            ctx.writeAndFlush(response);
+                        }
+                    });
+                }
+            });
+
+            ChannelFuture channelFuture = serverBootstrap.bind(8080).sync();
+            channelFuture.channel().closeFuture().sync();
+        } catch (InterruptedException e) {
+            log.error("server error", e);
+        } finally {
+            boss.shutdownGracefully();
+            worker.shutdownGracefully();
+        }
+    }
+
+}
+```
+
+#### 3.2.2 自定义协议
+
+**自定义协议的要素**
+
++ 魔数：用来在第一时间判定是否是无效数据包
++ 版本号：可以支持协议的升级
++ 序列化算法：消息正文到底采用哪种序列化反序列化方法，一般常用的有：json，protobuf，hessian，jdk等
++ 指令类型：是登录、注册、单聊、群聊等，跟业务相关
++ 请求序号：为了双工通信，提供异步能力
++ 正文长度
++ 消息正文
