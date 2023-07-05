@@ -4,6 +4,8 @@
 
 ### String
 
+**Value最大不能超过512MB**
+
 最常用的命令：
 
 ```
@@ -22,6 +24,8 @@ mget k1 k2 ...
 
 ```
 set k1 100
+setnx k1 v1 #如果k1不存在则设置成功；如果k1存在则设置失败
+setex k1 10 v1  #设置k1的值为v1，10s后过期
 incr k1  #+1
 decr k1  #-1
 increby k1 10  # +10
@@ -42,7 +46,7 @@ strlen k1
 
 ### List
 
-双向链表，添加元素：
+单个key，多个value，双向链表，添加元素：
 
 ```
 lpush key v1 v2 v3 ... #从链表的左边添加元素
@@ -79,6 +83,13 @@ hmset key filed1 value1 field2 value2 ... #一次性设置多个
 hget key field
 hmget key field1 field2 ...
 hgetall key  #一次性获取key的所有字段
+```
+
+获取key重的所有field和所有value
+
+```
+hkeys key    #如果key是[name:zhangsan age:20 sex:0]，那么hkeys key的结果是"name" "age" "sex"
+hvals key    #结果是 "zhangsan" "20" "0"
 ```
 
 应用场景：购物车（简单版）
@@ -846,6 +857,10 @@ redis中有一条命令incry / incr可以实现原子性的递增，可以做相
 > + `Read/Write Through Pattern`：缓存与数据库整合为一个服务，有服务来维护一致性；调用者调用该服务，无需关心缓存一致性问题；缺点就是维护成本很高
 > + `Write Behind Caching Pattern`：调用者只操作缓存，所有的增删改操作全部在缓存中进行，由其他线程异步的将缓存数据持久化到数据库，保证最终一致性；缺点是可能会造成数据丢失
 
+目的：要达成缓存与数据库数据的**最终一致性**
+
+给缓存设置过期时间，定期清理缓存并回写数据是保证最终一致性的解决方案，所有的写操作均以**数据库为准**
+
 主动更新中由缓存的调用者，在更新数据库的同时更新缓存，在操作数据库时，有三个问题需要考虑：
 
 + 删除缓存还是更新缓存
@@ -881,6 +896,23 @@ redis中有一条命令incry / incr可以实现原子性的递增，可以做相
 > + 线程2把旧数据写入缓存
 > + 线程1根据估算的时间，阻塞一段时间，一般sleep的时间大于线程2读数据 + 写缓存的时间，所以缓存中的旧数据会被线程1再次删除
 > + 之后，如果有其他线程来读缓存的话，就会再次从缓存中读取到最新值
+>
+> ```java
+> public void updateUserData(User user) {
+>     String key = CACHE_USER_KEY + user.getId();
+>     //1. 先删除缓存中的数据
+>     redisTemplate.delete(key);
+>     //2. 再更新数据库中的数据
+>     userMapper.updateUserByid(user);
+>     //3. 线程暂停一段时间（暂停的时间根据具体情况设置，通常是线程读数据 + 写缓存的时间 + 100~200ms），再次删除缓存中的数据
+>     try {
+>         Thread.sleep(2000);
+>     } catch (InterruptedException e) {
+>         e.printStackTrace();
+>     }
+>     redisTemplate.delete(key);
+> }
+> ```
 
 （2）先操作数据库，再更新缓存
 
@@ -898,7 +930,18 @@ redis中有一条命令incry / incr可以实现原子性的递增，可以做相
 
 > **消息队列解决缓存不一致问题**：再线程更新完数据库之后，往消息队列中发送消息，消费者接收到消息后再删除缓存，借助消息队列的重试机制来实现，达到最终一致性的效果；有一点问题就是消息队列的消息延迟会带来短暂的不一致性，在大多数情况下，这个延迟是可以被接受的
 >
-> 一般大公司本身都会有监听binlog消息的消息队列，主要是为了做一些核对的工作，这样，可以借助监听binlog的消息队列来做删除缓存的操作
+> 一般大公司本身都会有监听binlog消息的消息队列，主要是为了做一些核对的工作，这样，可以借助监听binlog的消息队列来做删除缓存的操作，流程如下：
+>
+> + （1）更新数据库数据
+> + （2）数据库会将操作信息写入binlog日志当中
+> + （3）订阅程序提取出所需要的数据以及key
+> + （4）另起一段非业务代码（与主线程分离），获得更新信息
+> + （5）尝试删除缓存操作
+> + （7）如果删除缓存失败，则重新从消息队列中获得该数据，重试操作
+>
+> <img src="Redis部分.assets/image-20230701084542799.png" alt="image-20230701084542799" style="zoom:80%;" />
+>
+> 
 
 **缓存更新策略的最佳实践方案**
 
@@ -927,6 +970,182 @@ public CommonResult<T> update(Entity entity) {
     
 }
 ```
+
+### **Redis缓存双写一致性**
+
+
+
+<img src="Redis部分.assets/image-20230621095150923.png" alt="image-20230621095150923" style="zoom:80%;" />
+
+在访问数据时，保证redis中的数据和mysql中的数据一致：
+
++ 如果Redis中**有数据**，**需要和数据库中的值相同**
++ 如果Redis中**无数据**，数据库中的值时**最新值**，**并准备回写Redis**
+
+缓存按照操作来分一般分为两种：
+
++ 只读缓存：比较简单，没有redis回写操作
++ 读写缓存：有写回操作，并且分为两种
+  + 同步直写策略，在更新完mysql中的数据之后，立刻将数据写入redis，缓存和数据库中的数据保持一致，适合热点数据、即时生效的数据
+  + 异步缓写策略，在更新完数据之后，允许mysql和redis中的数据出现一定时间的不一致，比如仓库库存，物流系统或者是缓存写入异常，需要借助消息队列进行写入操作
+
+**最基本的双写策略**
+
+```java
+@Service
+public class UserService {
+    @Resource
+    private UserMapper userMapper;
+    @Resource
+    private RedisTemplate<String, Object> redisTemplate;
+
+    public User getUserById(Long id) {
+        User user = null;
+        String key = CACHE_USER_KEY + id;
+
+        //1. 先从redis中查询数据，如果有则返回结果，如果没有则去查询mysql
+        user = (User) redisTemplate.opsForValue().get(key);       //##1
+
+        if(user == null) {
+
+            //2. 如果redis中无数据，则去mysql中查询
+            user = userMapper.getUseById(id);                    //##2
+            if(user == null) {
+                //3.1 如果mysql中也没有数据，返回null，并作一定的缓存穿透保护
+                return null;
+            } else {
+                //3.2 如果mysql中有数据，将数据写回redis
+                redisTemplate.opsForValue().set(key, user);
+            }
+        }
+        //如果redis中有数据，则直接返回
+        return user;
+    }
+}
+```
+
+**存在问题**
+
+在一般情况下，这种双写策略没有什么问题，但在高并发的情况下，同时有多个线程从redis中获取数据，即执行`##1`语句，当redis中没有数据时，这些线程同时会访问mysql数据库，执行`##2`语句，在线程数较多的情况下，会导致查询缓慢甚至mysql崩溃；并且由于查询mysql和回写redis并不是原子操作，所以有可能会出现数据覆盖的情况
+
+> **双检加锁策略**
+>
+> 当有多个线程去查询数据库的这条数据时，可以在第一个查询数据的请求上使用一个互斥锁（`synchronized`），只有第一个拿到锁的线程能够访问mysql并获得数据更新缓存，其余线程等待；在此之后的线程可以直接访问缓存获取数据
+>
+> 所谓双检，即是在加锁之后再检查以下缓存中有没有数据，这样，只有第一个拿到锁的线程去访问数据库，后续的线程均可以从缓存中查询数据
+>
+> ```java
+> public User getUserByIdSync(Long id) {
+>     User user = null;
+>     String key = CACHE_USER_KEY + id;
+> 
+>     //1. 先从redis中查询数据，如果有则返回结果，如果没有则去查询mysql
+>     user = (User) redisTemplate.opsForValue().get(key);
+> 
+>     if(user == null) {
+>         //2. 如果缓存中没有数据，则查询数据库，在多线程的情况下需要加锁
+>         synchronized (UserService.class) {
+>             //2.1 在加锁完成之后，再查询一次缓存，如果有数据则退出临界区
+>             user = (User) redisTemplate.opsForValue().get(key);
+>             if(user == null) {
+>                 //2.2 再次查询缓存，并且没有数据，再去访问数据库，此时只有一个线程在访问数据库
+>                 user = userMapper.getUseById(id);
+>                 if(user == null) {
+>                     //2.3 如果mysql中没有数据，则返回null并作一定的处理防止缓存击穿
+>                     return null;
+>                 } else {
+>                     //2.4 如果有数据，则将数据写回redis中
+>                     redisTemplate.opsForValue().setIfAbsent(key, user, 7L, TimeUnit.MINUTES);
+>                 }
+>             }
+>         }
+>     }
+>     return user;
+> }
+> ```
+
+
+
+### Canal
+
+Canal是由阿里巴巴开源的中间件，主要用途是用于MySQL数据库增量日志数据的订阅、消费和解析
+
+Canal的作用：
+
++ 数据库镜像
++ 数据库实时备份
++ 索引构建和实时维护（拆分异构索引、倒排索引等）
++ 业务cache刷新
++ 带业务逻辑的增量数据处理
+
+工作原理图：类似与mysql的主从复制，将自己伪装成MySQL的从机
+
+<img src="Redis部分.assets/image-20230701090527614.png" alt="image-20230701090527614" style="zoom:80%;" />
+
++ Canal模拟MySQL slave的交互协议，伪装自己为MySQL slave，向MySQL master发送dump协议
++ MySQL master收到dump请求，开始推送binary log给slave（即canal）
++ canal解析binary log对象
+
+**Canal案例**
+
+开启MySQL的binlog写入功能
+
+```
+##在MySQL的配置文件中添加
+log-bin=mysql-bin   ##开启binlog
+binlog-format=ROW  ##选择ROW模式，一种binlog的记录模式
+server_id=1   ##配置MySQL replaction需要定义
+```
+
+授权Canal能够访问MySQL
+
+```mysql
+drop user if exists 'canal'@'%';
+create user 'canal'@'%' identified by 'canal';
+grant all privileges on *.* to 'canal'@'%';
+flush privileges;
+
+select * from mysql.user;
+```
+
+下载canal，在github中下载canal.deployer版本的压缩包并解压
+
+修改canal的配置（conf/example/instance.properties），将地址修改为当前机器的MySQL地址，并且修改canal在mysql上的账户
+
+```
+9 canal.instance.master.address=xxx.xxx.xxx.xxx:3306
+
+33 canal.instance,dbUsername=canal
+34 canal.instance.dbPassword=xxx
+```
+
+启动canal，查看日志确保canal正常启动
+
+选定一张被canal监控的表，创建Java模块，导入canal的maven坐标
+
+```xml
+<dependency>
+	<groupId>com.alibaba.otter</groupId>
+    <artifactId>canal.client</artifactId>
+    <version>1.1.0</version>
+</dependency>
+```
+
+修改配置
+
+```yml
+server:
+  port: 7894
+spring:
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driver-class-name: com.mysql.jdbc.driver
+    url: jdbc:mysql://mysql Ip:port/表名?useUnicode=true
+    username: root
+    password: 123456
+```
+
+
 
 ### 单节点Redis在并发情况下的问题
 
@@ -1004,6 +1223,155 @@ Redis也会自动触发对AOF文件的重写，在配置文件中：
 ```conf
 auto-aof-rewrite-percentage 100   #AOF文件比上次文件增加超过多少时，触发重写，默认是增加一倍
 auto-aof-rewrite-min-size 64mb    #AOF文件体积达到多大时，触发重写，默认是64mb
+```
+
+
+
+## 五、Redis集群
+
+### Redis主从复制
+
+主从复制至少有两台Redis服务器，一台称为Master，一台称为Slave，**Master以写操作为主，Slave以读操作为主**
+
+当Master中的数据变化时，自动将新的数据异步同步到其他Slave数据库
+
+主从复制的作用：
+
++ 读写分离
++ 容灾恢复
++ 数据备份
++ 水平扩容支撑高并发
+
+**主从复制的配置**
+
+一些基本命令：
+
+```
+info replication   ##查看复制节点的主从关系和配置信息
+replicaof 主机IP:主机端口     ##一般写在redis.conf配置文件内
+
+##每次与主机断开之后，都需要重新连接，如果未在redis.conf中配置主机信息，需要手动通过命令再次连接主机
+##在从机运行期间，如果使用此命令则会使当前slave停止与原主库的同步关系，转而和新的主库同步
+slaveof 主机IP:主机端口    
+
+slaveof no one    ##使当前数据库停止与其他数据库的同步，转成主数据库
+```
+
+从原生配置文件redis.conf开始的一般的配置步骤：
+
+1. 开启daemonize yes
+2. 注释掉bind 127.0.0.1
+3. protected-node no
+4. 指定端口 port 6379
+5. 指定当前工作目录 dir xxx
+6. pid文件名 pidfile xxx
+7. 日志文件名 logfile xxx
+8. 配置密码 requirepass xxxx
+9. 配置rdb文件名
+10. 配置aof文件名（可选，也可以不开启aof）
+11. **配置从机的masterauth**
+
+> 权限细节：master如果配置了requirepass参数，需要密码登录，那么slave就要配置masterauth来设置校验密码，否则的话master会拒绝slave的访问请求
+>
+> ```
+> ##在slave从机的配置文件中配置master机的访问密码
+> masterauth xxxx
+> ```
+
+一些基本问题：
+
++ 从机只能进行读取操作
++ 主机如果意外宕机，在不进行任何操作的情况下，主从关系仍然会保存下来
++ 主机意外宕机并重新启动后，主从关系仍然存在，从机也能够成功复制主机重启后设置的数据
++ 从机如果意外宕机，重启后，主从关系仍然存在
++ 如果通过手动命令进行主从配置，则主从关系只有在当次连接中生效，当从机或者主机仍和一个重启都会破坏主从关系
+
+### Redis哨兵机制
+
+哨兵机制监控后台master主机是否故障，如果故障，则根据**投票数**自动将某一个从库转换为新的主库，继续对外服务
+
+哨兵机制的作用：
+
++ 主从监控：监控主从redis库运行是否正常
++ 消息通知：哨兵可以将故障转移的结果发送给客户端
++ 故障转移：如果master异常，则会进行主从切换，将其中一个slave作为新的master
++ 配置中心：客户端通过连接哨兵来获得当前redis服务的主节点地址
+
+哨兵机制体系结构，哨兵只负责监控工作，并不存储数据
+
+<img src="Redis部分.assets/image-20230620101527118.png" alt="image-20230620101527118" style="zoom:80%;" />
+
+
+
+配置哨兵：sentinel.conf
+
+```
+##设置哨兵要监控的主机<quorum>为投票数，即多少哨兵认为主机已经宕机了，如果达到票数即可选举新主机
+sentinel monitor <master-name> <ip> <redis-port> <quorum>    
+```
+
+> `<quorum>`表示确认主机**客观下线（宕机）**的最少哨兵数量
+>
+> 客观下线是指，在网络不可靠的情况下，有时候sentinel会因为网络拥堵误认为主机已经下线，在sentinel集群中需要通过多个哨兵相互沟通来确定主机是否下线，`<quorum>`参数只是进行客观下线的一个依据，当至少有`quorum`个哨兵认为主机下线时，才会进行故障转移（选取新的主机）
+
+### Redis集群分片
+
+
+
+
+
+## 附录 Springboot整合Redis连接Redis集群
+
+本次使用Redis三主三从集群
+
+### 配置文件
+
+```yml
+spring: 
+  redis:
+    password: xxxxx   ##连接redis的密码
+    cluster:
+      max-redirects: 3 #在群集中执行命令时要遵循的最大重定向数目
+      nodes: 192.168.0.0:6379, 192.168.0.1:6380, ...    #集群中的各台redis的ip地址和端口号
+    lettuce:      #一些redis连接池的配置
+      pool:
+        max-active: 8
+        max-wait: -1ms
+        max-idle: 8
+        min-idle: 0
+```
+
+### 存在问题
+
+如果redis中的某一台主机宕机，比如6381号主机宕机，在redis集群中，根据从机上位原则，6381的从机6384会上位为主机，在redis客户端中操作仍然能够正常的写入和读取，但如果通过springboot项目进行访问，则会报错
+
+Springboot控制台会报异常：`Connection refused: no further information: /192.168.0.0:6381`，当再次发送请求做新增操作时，会等待一段时间，然后报超时错误：`Command timed out after 1 minute`
+
+<img src="Redis部分.assets/image-20230621093605297.png" alt="image-20230621093605297" style="zoom:80%;" />
+
+最主要的原因就是Springboot并没有感知到Redis集群中的变化，Springboot2.x的版本采用Lettuce作为Redis的连接池，当Redis集群发生变化，Lettuce默认不会刷新节点拓扑，也就不会感知到集群的变化
+
+**解决方法**
+
+修改yml文件，新增配置：
+
+```yml
+spring: 
+  redis:
+    password: xxxxx   ##连接redis的密码
+    cluster:
+      max-redirects: 3 #在群集中执行命令时要遵循的最大重定向数目
+      nodes: 192.168.0.0:6379, 192.168.0.1:6380, ...    #集群中的各台redis的ip地址和端口号
+    lettuce:      #一些redis连接池的配置
+      pool:
+        max-active: 8
+        max-wait: -1ms
+        max-idle: 8
+        min-idle: 0
+      cluster: 
+        refresh:    #支持集群拓扑动态感应刷新，自适应拓扑刷新是否使用所有可用的更新，默认为false
+          adaptive: true
+          period: 2000   #刷新的时间单位ms
 ```
 
 
@@ -1502,13 +1870,15 @@ RESP的数据类型：
 
 ### BitMap
 
-BitMap常用于大数据量的统计工作，在Redis中利用string类型的数据结构实现BitMap，因此最大的上限是512M，转换为bit则是2^32个比特位
+BitMap是由0和1状态表现的二进制bit数组
+
+BitMap常用于大数据量的统计工作，在Redis中**利用string类型的数据结构实现BitMap**，因此最大的上限是512M，转换为bit则是2^32个比特位
 
 BitMap的常用命令：
 
 ```
 setbit key offset value  #向bitmap的第offset位设置值value，要不就是1要不就是0
-#示例：
+#示例：bitmap的offset从0开始
 127.0.0.1:6379> setbit bit 0 1
 127.0.0.1:6379> setbit bit 1 1
 127.0.0.1:6379> setbit bit 2 1
@@ -1533,9 +1903,19 @@ bitfield key  #操作bitMap中bit数组中的指定位置的值，这个命令�
 127.0.0.1:6379> bitfield bit get u2 0
 1) (integer) 3
 
+strlen key  #查询bitmap的key占用了几个字节，并不是实际的字符串长度，比如11001100就是1个byte
+
+bitop operation destkey key [key]  #对不同的二进制存储数据进行位运算（and, or, not, xor）将结果保存至destkey中 
+比如
+k1 10100101
+k2 01001010   
+bitop and k3 k1 k2 则k3的结果是 00000000
+bitop or k4 k1 k2  则k4的结果是 11101111
 ```
 
 bitmap的用处就是网站的签到功能，也可以统计该用户在一个月内的签到天数
+
+由于bitmap的每一位都只有两种值0或者1，所以可以用于判断用户是否做过某些事情，比如在网页中的广告是否被点击播放
 
 ### HyperLogLog
 
@@ -1550,6 +1930,10 @@ HyperLogLog是从LogLog算法派生的概率算法，用于确定非常大的集
 
 Redis中的HLL是基于string结构实现的，**单个HLL的内存永远小于16kb**，内存占用量很低，但是其测量结果是概率性的，也就是说可能不准确，有大概0.81%的误差，但是对于数据量极大的UV统计来说，可以忽略不记
 
+> HyperLogLog在输入元素的数量或者体积非常大的情况下，计算基数所需要的空间总是固定的，并且很小
+>
+> **基数**：一种数据集，去除重复元素的真实个数，比如 U = {4,8,45,96,54,4,8,77,21,1} 去除重复元素4，8就是U = {4,8,45,96,54,77,21,1}，元素个数为8，基数就是8
+
 ```
 PFADD key element1 element2 ...   #将element1 element2 ...等元素加入到key中
 
@@ -1557,6 +1941,14 @@ PFCOUNT key1 [key2 ...]   #统计key1中的元素个数，概率统计，可能�
 
 PFMERGE destkey sourcekey   #将两个不同的HyperLogLog合并成一个
 ```
+
+### GEO
+
+用于记录经纬坐标
+
+使用场景：美团地图位置附近的酒店推送；高德地图附近的核酸检测点
+
+### Redis流Stream
 
 
 
@@ -1779,3 +2171,154 @@ typedef struct redisObject {
 > + 计算 1 / (旧次数 * lru_log_factor + 1)，记录为P，lru_log_factor默认为10，所以如果访问地越频繁，后期计数的频率会越低
 > + 如果R < P，则计数器 + 1，最大不超过255，当key被频繁访问时，P会变得很小，因为旧访问数会很大，计数器 + 1的概率就会变得很小
 > + 访问次数会随着时间衰减，距离上一次访问时间每隔lru_decay_time分钟（默认是1min），计数器就会减1
+
+
+
+## 附录 Redis持久化
+
+### RDB持久化
+
+RDB（Redis Database）：以指定**时间间隔**执行数据集的时间点快照
+
+类似照片记录的方式，把某一时刻的数据和状态以文件的形式写到磁盘上，默认RDB的存储文件名为dump.rdb
+
+```
+##在配置文件中以save命令设置，默认是以下三条，save m n的意思是，在m秒内如果修改了n个key的值，则会触发RDB将数据写入磁盘
+save 900 1
+save 300 10
+save 60 10000
+```
+
+RDB的优势：
+
++ 适合大规模的数据恢复
++ 按照业务定时备份
++ 对数据完整性和一致性要求不高
++ RDB文件在内存中的加载速度比AOF快得多
+
+RDB的缺点：
+
++ 在一定间隔时间做一次备份，如果Redis意外宕机，则会丢失当前至最近一次快照期间的数据
++ 内存数据的全量同步，如果数据量太大，则会导致IO严重影响服务器性能
++ RDB通过子进程进行数据的复制，会将内存中的数据克隆一份，大数据量下会占用存储空间
+
+### AOF持久化
+
+AOF（Append Only File）：以日志的形式记录每一个**写操作**，将Redis执行过的所有写操作记录下来，每次追加在文件末尾
+
+在Redis重启的时候会读取aof文件进行数据重构，即从头到尾执行一遍写操作，完成数据恢复，默认aof文件为appendonly.aof
+
+```
+##开启AOF，需要在配置文件中的appendonly项设置为yes
+appendonly yes
+```
+
+AOF的优势：
+
++ 当开启aof时，可以每秒进行一次写操作记录，在最坏的情况下也只会丢失1s内的数据
++ Redis可以对aof文件进行修复
++ 当aof文件变得很大时，Redis后台会对aof文件进行重写，进行“减重”
++ 如果在操作时不慎删除了Redis中的数据，可以通过修改aof文件进行数据的恢复
+
+AOF的缺点：
+
++ aof文件通常比相同数据集的等效RDB文件大
+
+
+
+> **RDB和AOF的混合持久化**
+>
+> Redis可以同时进行RDB和AOF的持久化策略，当二者同时存在时，Redis会优先加载AOF文件
+
+
+
+## 附录 Redis事务
+
+Redis事务可以一次执行**一组命令**，一个事务中的所有命令都会序列化，**按顺序地串行执行而不被其他命令插入**
+
+Redis事务的特点：
+
++ 单独的隔离操作，Redis事务仅仅是保证事务里的操作会被连续独占地执行，在执行完事务内所有命令前不会去执行其他客户端的请求
++ 没有隔离级别的概念，事务提交前所有指令均不会被执行，不会存在事务内的查询要看到事务里的更新这类问题
++ **不保证原子性**，Redis的事务不保证原子性，只有决定是否开始执行全部指令的能力，没有执行到一半回滚的能力
++ 排它性，Redis会保证一个事务内的命令一次执行，不被其他命令插入
+
+```
+###Redis事务命令
+127.0.0.1:6379> multi      ###开启Redis事务
+OK
+127.0.0.1:6379(TX)> set k1 100
+QUEUED                      ### 命令入队
+127.0.0.1:6379(TX)> incr k1
+QUEUED
+127.0.0.1:6379(TX)> incr k1
+QUEUED
+127.0.0.1:6379(TX)> exec     ###执行队列中的命令
+1) OK
+2) (integer) 101
+3) (integer) 102
+127.0.0.1:6379> get k1
+"102"
+127.0.0.1:6379> multi 
+OK
+127.0.0.1:6379(TX)> incr k1
+QUEUED
+127.0.0.1:6379(TX)> incr k1
+QUEUED
+127.0.0.1:6379(TX)> discard   ### 取消执行事务
+OK
+127.0.0.1:6379> get k1
+"102"
+127.0.0.1:6379> multi 
+OK
+127.0.0.1:6379(TX)> set k2 v2
+QUEUED
+127.0.0.1:6379(TX)> incr k2
+QUEUED
+127.0.0.1:6379(TX)> exec
+1) OK
+2) (error) ERR value is not an integer or out of range     ###如果队列中的命令在exec时出现错误，事务并不会回滚
+127.0.0.1:6379> get k2
+"v2"
+127.0.0.1:6379> multi 
+OK
+127.0.0.1:6379(TX)> set k3 v3
+QUEUED
+127.0.0.1:6379(TX)> set k4 v4
+QUEUED
+127.0.0.1:6379(TX)> set k4               ###如果在入队时，命令本身出现语法错误，会放弃整个队列的命令执行
+(error) ERR wrong number of arguments for 'set' command
+127.0.0.1:6379(TX)> exec
+(error) EXECABORT Transaction discarded because of previous errors.
+```
+
+**watch命令**
+
+Redis使用watch来提供乐观锁定，类似于CAS
+
+```
+==========================客户端1
+127.0.0.1:6379> watch balance     ##balance = 100   k1 = v1
+OK
+127.0.0.1:6379> multi 
+OK
+127.0.0.1:6379(TX)> set balance 200
+QUEUED
+127.0.0.1:6379(TX)> set k1 v1after
+QUEUED
+==========================客户端2
+127.0.0.1:6379> set balance 300
+OK
+127.0.0.1:6379> get balance
+"300"
+==========================客户端1
+127.0.0.1:6379(TX)> exec     ##当有其他客户端对balance的值进行修改时，客户端1的事务操作就会失败
+(nil)
+127.0.0.1:6379> get k1
+"v1"
+```
+
+unwatch接触监控
+
+一旦执行exec，之前加的监控所都会被取消；当客户端连接丢失，所有key的监控也会被取消
+
