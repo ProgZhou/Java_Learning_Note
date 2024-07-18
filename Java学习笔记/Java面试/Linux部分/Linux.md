@@ -496,3 +496,46 @@ netstat -nlp | grep 端口号    #查看网络端口号占用情况
 + `-n`：拒绝显示别名，能显示数字的全部转化成数字
 + `-l`：仅列出在监听的服务状态
 + `-p`：表示显示哪个进程在调用
+
+lsof -i: 用于查看某一端口的占用情况，比如查看5000端口的使用情况
+
+```
+lsof -i:5000
+##常用命令
+lsof abc.txt   //查看开启文件abc.txt的进程
+lsof -c abc    //显示abc进程现在打开的文件
+lsof -c -p 1234 //列出进程号为1234的进程打开的文件
+```
+
+netstat命令：netstat是一个监控tcp/ip网络的工具，可以显示路由表，实际的网络链接以及每一个网络接口设备的状态信息
+
+```
+#netstat的参数：
+-a : 显示所有连线中的Socket
+-t : 指明显示TCP端口
+-u : 指明显示UDP端口
+-l : 仅显示监听套接字(所谓套接字就是使应用程序能够读写与收发通讯协议(protocol)与资料的程序)
+-p : 显示进程标识符和程序名称，每一个套接字/端口都属于一个程序。
+-n : 不进行DNS轮询，显示IP(可以加速操作)
+
+#常用命令
+netstat -tnlp   //查看当前所有tcp端口的占用情况
+netstat -anp    //查看端口的连接客户端ip
+```
+
+防火墙命令
+
+```
+#添加指定需要开放的端口：
+firewall-cmd --add-port=8088/tcp --permanent
+#查询指定端口是否开启成功：
+firewall-cmd --query-port=8088/tcp
+#移除指定端口：
+firewall-cmd --permanent --remove-port=8088/tcp
+#查询开放的防火墙端口列表
+firewall-cmd --zone=public --list-ports
+
+#重载入添加的端口：
+firewall-cmd --reload
+```
+

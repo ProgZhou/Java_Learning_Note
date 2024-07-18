@@ -14,7 +14,7 @@ Docker包含两方面的技术：
 
 + 镜像技术：打破代码即应用的概念，从系统环境开始，自底至上打包应用
 
-  ![打包环境](C:\Users\86198\Desktop\JavaEE\Docker\image\打包环境.jpg)
+  ![打包环境](.\image\打包环境.jpg)
 
   
 
@@ -119,6 +119,15 @@ image镜像文件可以看作是容器的模板，Docker根据image文件生成�
 ## 二、Docker的基本操作
 
 ### 2.1 Docker的安装
+
+docker安装步骤参考：https://docs.docker.com/engine/install/centos/
+
++ 安装gcc : `yum -y install gcc`
++ 安装gcc-c++: `yum -y install gcc-c++`
++ 安装docker-repository：`yum install -y yum-utils`
++ 设置docker镜像：`yum-config-manager --add-repo http://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo`
++ 安装docker引擎：`yum install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin`
++ 安装完成之后启动docker: `systemctl start docker`
 
 
 
@@ -800,9 +809,9 @@ mysql>
 
   ```
   docker run -d -p 3306:3306 --privileged=true 
-  -v /usr/local/docker/mysql/log:/var/log/mysql   
-  -v /usr/local/docker/mysql/data:/var/lib/mysql  
-  -v /usr/local/docker/mysql/conf:/etc/mysql/conf.d   
+  -v /data/database/mysql/log:/var/log/mysql   
+  -v /data/database/mysql/data:/var/lib/mysql  
+  -v /data/database/mysql/conf:/etc/mysql/conf.d    
   --name some-mysql -e MYSQL_ROOT_PASSWORD=docker123456 mysql:8.0.26
   ```
 
@@ -832,9 +841,9 @@ total 92
 
 #### 把/usr/local/docker/redis作为本机的数据卷与docker中的数据卷做映射
 docker run -p 6379:6379 --name some-redis --privileged=true 
--v /usr/local/docker/redis/redis.conf:/etc/redis/redis.conf
--v /usr/local/docker/redis/data:/data
--d redis:6.2.4 redis-server /etc/redis/redis.conf  #读取配置文件，相当于本机下的redis-server xxx/redis.conf
+-v /data/database/redis/conf/redis.conf:/etc/redis/redis.conf
+-v /data/database/redis/data:/data
+-d redis:6.2.8 redis-server /etc/redis/redis.conf  #读取配置文件，相当于本机下的redis-server xxx/redis.conf
 
 #### 最后可以修改本机中redis的配置文件来验证本机是否与docker中容器形成了映射
 ```
@@ -2138,6 +2147,104 @@ EXPOSE 6001
 + 然后进入mysql容器，创建数据库和表
 
 + 如果要关停容器，可以使用`docker compose stop`一键关停
+
+#### 3.6.4 Docker compose安装elk
+
+> ELK: elasticsearch logstash kibana
+
+
+
++ 创建docker elk的挂载目录：`mkdir /data/elk`
+
+  ```
+  ##目录结构如下：
+  ├── elasticsearch
+  │ ├── data
+  │ └── plugins
+  └── logstash
+    └── config
+  ```
+
++ 创建logstash.conf配置文件：
+
+  ```
+  input {
+    tcp {
+      mode => "server"
+      host => "0.0.0.0"
+      port => 4560      //输入日志的端口
+      codec => json
+    }
+  }
+  output {
+    elasticsearch {
+      hosts => "es:9200"
+      index => "logstash-%{+YYYY.MM.dd}"
+    }
+  }
+  ```
+
++ 创建docker-compose.yml文件
+
+  ```yaml
+  version: '3.7'
+  services:
+    elasticsearch:
+      image: elasticsearch:7.17.7
+      container_name: elasticsearch
+      privileged: true
+      user: root
+      environment:
+        #设置集群名称为elasticsearch
+        - cluster.name=elasticsearch 
+        #以单一节点模式启动
+        - discovery.type=single-node 
+        #设置使用jvm内存大小
+        - ES_JAVA_OPTS=-Xms512m -Xmx512m 
+      volumes:
+        - /data/elk/elasticsearch/plugins:/usr/share/elasticsearch/plugins
+        - /data/elk/elasticsearch/data:/usr/share/elasticsearch/data
+      ports:
+        - 9200:9200
+        - 9300:9300
+  
+    logstash:
+      image: logstash:7.17.7
+      container_name: logstash
+      ports:
+         - 4560:4560
+      privileged: true
+      environment:
+        - TZ=Asia/Shanghai
+      volumes:
+        #挂载logstash的配置文件
+        - /data/elk/logstash/config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf 
+      depends_on:
+        - elasticsearch 
+      links:
+        #可以用es这个域名访问elasticsearch服务
+        - elasticsearch:es 
+      
+  
+    kibana:
+      image: kibana:7.17.7
+      container_name: kibana
+      ports:
+          - 5601:5601
+      privileged: true
+      links:
+        #可以用es这个域名访问elasticsearch服务
+        - elasticsearch:es 
+      depends_on:
+        - elasticsearch 
+      environment:
+        #设置访问elasticsearch的地址
+        - elasticsearch.hosts=http://es:9200 
+  ```
+
++ 启动docker compose: `docker compose up -d`
+
+
 
 ### 3.7 Docker可视化工具Portainer
 
