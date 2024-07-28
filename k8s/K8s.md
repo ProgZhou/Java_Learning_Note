@@ -1213,3 +1213,1462 @@ pod的生命周期指的是pod对象从创建到终止的这段时间范围，�
 + (7). pod对象中的容器进程收到停止信号
 + (8). 宽限期结束后，若pod中还存在仍在运行的进程，那么pod对象会收到立即终止的信号
 + (9). kubelet请求apiserver将此pod资源的宽限期设置为0从而完成删除操作
+
+#### 4.4.2 初始化容器
+
+初始化容器是在pod的主容器启动之前要运行的容器，主要是做一些主容器的前置工作，它具有两大特征：
+
++ 初始化容器必须运行完成直至结束，如果某个初始化容器运行失败，那么k8s需要重启它直到成功完成
++ 初始化容器必须按照定义的顺序执行，当且仅当前一个成功之后，后面的一个才能运行
+
+初始化容器有很多的应用场景：
+
++ 提供主容器镜像中不具备的工具程序或自定义代码
++ 初始化容器要先于应用容器串行启动并运行完成，因此可用于延后应用容器的启动直至其依赖的条件得到满足
+
+```powershell
+#查看初始化容器的定义项
+[root@k8s-master ~]# kubectl explain pod.spec.initContainers
+```
+
+创建一个带有初始化容器的yaml
+
+```yaml
+apiVersion: v1
+kind: pod
+metadata:
+  name: pod-base
+  namespace: dev
+  labels:
+    user: progZhou
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.17.1
+      ports:
+      - containerPort: 80
+        name: nginx-port
+        protocol: TCP
+  initContainers:
+    - name: test-mysql
+      image: busybox:1.30
+      command: ['sh', '-c', 'until ping ip:port -c 1; do echo waiting for mysql...; sleep 2; done;']
+    - name: test-redis
+      image: busybox:1.30
+      command: ['sh', '-c', 'until ping ip:port -c 1; do echo waiting for redis...; sleep 2; done;']
+```
+
+#### 4.4.3 钩子函数
+
+钩子函数能够感知自身生命周期中的事件，并在相应的时刻到来时运行用户指定的程序代码
+
+k8s在主容器的启动之后和停止之前提供了两个钩子函数：
+
++ postStart：主容器创建之后执行，如果失败了会重启容器
++ preStop：容器终止之前执行，执行完成之后容器将成功终止，在其完成之前会阻塞删除容器的操作
+
+```powershell
+[root@k8s-master ~]# kubectl explain pod.spec.containers.lifecycle
+KIND:     Pod
+VERSION:  v1
+
+RESOURCE: lifecycle <Object>
+
+DESCRIPTION:
+     Actions that the management system should take in response to container
+     lifecycle events. Cannot be updated.
+
+     Lifecycle describes actions that the management system should take in
+     response to container lifecycle events. For the PostStart and PreStop
+     lifecycle handlers, management of the container blocks until the action is
+     complete, unless the container process fails, in which case the handler is
+     aborted.
+
+FIELDS:
+   postStart	<Object>
+     PostStart is called immediately after a container is created. If the
+     handler fails, the container is terminated and restarted according to its
+     restart policy. Other management of the container blocks until the hook
+     completes. More info:
+     https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks
+
+   preStop	<Object>
+     PreStop is called immediately before a container is terminated due to an
+     API request or management event such as liveness/startup probe failure,
+     preemption, resource contention, etc. The handler is not called if the
+     container crashes or exits. The reason for termination is passed to the
+     handler. The Pod's termination grace period countdown begins before the
+     PreStop hooked is executed. Regardless of the outcome of the handler, the
+     container will eventually terminate within the Pod's termination grace
+     period. Other management of the container blocks until the hook completes
+     or until the termination grace period is reached. More info:
+     https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks
+
+##钩子函数处理器支持使用三种方式定义动作：
+[root@k8s-master ~]# kubectl explain pod.spec.containers.lifecycle.postStart
+KIND:     Pod
+VERSION:  v1
+
+RESOURCE: postStart <Object>
+
+DESCRIPTION:
+     PostStart is called immediately after a container is created. If the
+     handler fails, the container is terminated and restarted according to its
+     restart policy. Other management of the container blocks until the hook
+     completes. More info:
+     https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/#container-hooks
+
+     Handler defines a specific action that should be taken
+
+FIELDS:
+   exec	<Object>    ##在容器内执行一次命令
+     One and only one of the following should be specified. Exec specifies the
+     action to take.
+
+   httpGet	<Object>     ##在当前容器中向某url发起http请求
+     HTTPGet specifies the http request to perform.
+
+   tcpSocket	<Object>  ##在当前容器尝试访问指定的socket
+     TCPSocket specifies an action involving a TCP port. TCP hooks not yet
+     supported
+```
+
+创建一个带有钩子函数的容器
+
+```yaml
+apiVersion: v1
+kind: pod
+metadata:
+  name: pod-base
+  namespace: dev
+  labels:
+    user: progZhou
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.17.1
+      ports:
+      - containerPort: 80
+        name: nginx-port
+        protocol: TCP
+      lifecycle:
+        postStart:
+          exec: 
+            command: ["/bin/sh", "-c", "echo post start nginx container... > /usr/share/nginx/html/index.html"]
+```
+
+启动容器
+
+```powershell
+[root@k8s-master kubernetes]# kubectl create -f nginx-lifecycle.yaml 
+pod/pod-base created
+[root@k8s-master kubernetes]# kubectl get pod -n dev -o wide
+NAME       READY   STATUS    RESTARTS   AGE   IP                NODE         NOMINATED NODE   READINESS GATES
+pod-base   1/1     Running   0          67s   192.168.235.197   k8s-master   <none>           <none>
+[root@k8s-master kubernetes]# curl 192.168.235.197:80
+post start nginx container...
+```
+
+#### 4.4.4 容器探测
+
+容器探测用于检测容器中的应用实例是否正常工作，是保障业务可用性的一种传统机制，如果经过探测，实例的状态不符合预期，那么k8s就会把实例摘除，不承担业务流量
+
+<img src="./assets/image-20240720092917598.png" alt="image-20240720092917598" style="zoom:80%;" />
+
+k8s提供了两种探针来实现容器探测，分别是：
+
++ liveness probes：存活性探针，用于检测应用实例当前是否处于正常运行状态，如果不是，k8s会重启容器
++ readiness probes：就绪性探针，用于检测应用实例当前是否可以接收请求，如果不能，k8s不会转发流量
+
+> livenessProbe决定是否重启容器，readinessProbe决定是否将请求转发给容器
+
+```powershell
+#readinessProbe相同
+[root@k8s-master kubernetes]# kubectl explain pod.spec.containers.livenessProbe
+KIND:     Pod
+VERSION:  v1
+
+RESOURCE: livenessProbe <Object>
+
+DESCRIPTION:
+     Periodic probe of container liveness. Container will be restarted if the
+     probe fails. Cannot be updated. More info:
+     https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+
+     Probe describes a health check to be performed against a container to
+     determine whether it is alive or ready to receive traffic.
+
+FIELDS:
+   exec	<Object>
+     One and only one of the following should be specified. Exec specifies the
+     action to take.
+
+   failureThreshold	<integer>
+     Minimum consecutive failures for the probe to be considered failed after
+     having succeeded. Defaults to 3. Minimum value is 1.
+
+   httpGet	<Object>
+     HTTPGet specifies the http request to perform.
+
+   initialDelaySeconds	<integer>
+     Number of seconds after the container has started before liveness probes
+     are initiated. More info:
+     https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+
+   periodSeconds	<integer>
+     How often (in seconds) to perform the probe. Default to 10 seconds. Minimum
+     value is 1.
+
+   successThreshold	<integer>
+     Minimum consecutive successes for the probe to be considered successful
+     after having failed. Defaults to 1. Must be 1 for liveness and startup.
+     Minimum value is 1.
+
+   tcpSocket	<Object>
+     TCPSocket specifies an action involving a TCP port. TCP hooks not yet
+     supported
+
+   timeoutSeconds	<integer>
+     Number of seconds after which the probe times out. Defaults to 1 second.
+     Minimum value is 1. More info:
+     https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+
+```
+
+存活性探针示例：
+
+```yaml
+apiVersion: v1
+kind: pod
+metadata:
+  name: pod-base
+  namespace: dev
+  labels:
+    user: progZhou
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.17.1
+      ports:
+      - containerPort: 80
+        name: nginx-port
+        protocol: TCP
+      livenessProbe:
+        exec: 
+          command: ["/bin/cat", "/tmp/hello.txt"]  
+```
+
+#### 4.4.5 重启策略
+
+当存活性探针检测失败，k8s就会对容器所在的pod进行重启，重启策略有3种：
+
++ Always：容器失效时，自动重启该容器，默认值
++ OnFaliure：容器终止运行且退出码不为0时重启
++ Never：不论状态是什么，都不重启容器
+
+重启策略适用于pod对象中的所有容器，首次需要重启的容器，将在其需要时立即进行重启，随后再次需要重启的操作将由kubelet延迟一段时间后进行，且反复的重启操作的延迟时常依次为10s，20s，40s，80s，160s和300s
+
+```powershell
+[root@k8s-master kubernetes]# kubectl explain pod.spec.restartPolicy
+KIND:     Pod
+VERSION:  v1
+
+FIELD:    restartPolicy <string>
+
+DESCRIPTION:
+     Restart policy for all containers within the pod. One of Always, OnFailure,
+     Never. Default to Always. More info:
+     https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#restart-policy
+```
+
+### 4.5 Pod调度
+
+在默认情况下，一个pod在哪个Node节点上运行，是由Schedule组件采用相应的算法计算出来的，这个过程是不受人工控制的，但在实际使用过程中，这并不满足需求，很多情况下，用户需要控制某些pod到达指定的Node上，k8s提供了四大类调度方式：
+
++ **自动调度**：运行在哪个节点上完全由Schedule经过一系列算法计算得出
++ **定向调度**：指定NodeName或者通过NodeSelector调度
++ **亲和性掉地**：NodeAffinity，PodAffinity，PodAntiAffinity
++ **污点，容忍调度**：Taints，Toleration
+
+#### 4.5.1 定向调度
+
+定向调度，指的是利用在pod上声明nodeName或者nodeSelector，以此将Pod调度到指定的node节点上
+
+> 这是强制调度，即使nodeName节点不存在，也会向上面进行调度，只不过pod会运行失败
+
+**NodeName**
+
+nodeName用于强制约束将pod调度到指定的Name的Node上
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+  namespace: dev
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:1.18.0
+      ports:
+      - name: nginx-port
+        containerPort: 80
+        protocol: TCP
+  nodeName: k8s-master    #指定调度到master节点上
+```
+
+**NodeSelector**
+
+nodeSelector用于将pod调度到添加了指定标签的node节点上，它是通过k8s的label-selector机制实现的，也就是说，在pod创建之前，会由schedule使用MatchNodeSelector调度策略进行label匹配，找出目标node，然后将pod调度到目标节点，匹配也是强制的
+
+```powershell
+#给节点打上标签
+[root@k8s-master kubernetes]# kubectl label nodes k8s-master env=test
+node/k8s-master labeled
+```
+
+将node调度到有指定标签的node上
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+  namespace: dev
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:1.18.0
+      ports:
+      - name: nginx-port
+        containerPort: 80
+        protocol: TCP
+  nodeSelector:
+    env: test    ##将pod调度到标签env=test的节点上
+```
+
+#### 4.5.2 亲和性调度
+
+k8s还提供了一种亲和性调度(Affinity)，在NodeSelector的基础上进行了扩展，可以通过配置的形式，实现优先选择满足条件的Node进行调度，如果没有，也可以调度到不满足条件的节点上，使得调度更加灵活
+
+Affinity主要分为三类：
+
++ `nodeAffinity`：node亲和性，以node为目标，解决pod可以调度到哪些node的问题
++ `podAffinity`：pod亲和性，以pod为目标，解决pod可以和哪些已经存在的pod部署在同一个拓扑域中的问题
++ `podAffinity`：pod反亲和性，以pod为目标，解决pod不能和哪些已经存在的pod部署在同一个拓扑域中的问题
+
+> **亲和性**：如果两个应用交互频繁，那就有必要利用亲和性将两个应用尽量部署在同一个节点上，比如pod1是一个应用，需要频繁的访问数据库，而pod2上正是部署的数据库应用，则pod1需要尽量和pod2在同一个node上
+>
+> **反亲和性**：当应用采用多副本部署时(集群)，有必要采用反亲和性让各个应用实例打散分布在各个node上，比如pod1和pod2是相同的两个应用的副本，需要尽可能将这两个pod分布到不同的node上保证服务的高可用
+
+<img src="./assets/image-20240720102752683.png" alt="image-20240720102752683" style="zoom:80%;" />
+
+**nodeAffinity**
+
+```powershell
+[root@k8s-master ~]# kubectl explain pod.spec.affinity.nodeAffinity
+...
+FIELDS:
+   preferredDuringSchedulingIgnoredDuringExecution	<[]Object>
+     The scheduler will prefer to schedule pods to nodes that satisfy the
+     affinity expressions specified by this field, but it may choose a node that
+     violates one or more of the expressions. The node that is most preferred is
+     the one with the greatest sum of weights, i.e. for each node that meets all
+     of the scheduling requirements (resource request, requiredDuringScheduling
+     affinity expressions, etc.), compute a sum by iterating through the
+     elements of this field and adding "weight" to the sum if the node matches
+     the corresponding matchExpressions; the node(s) with the highest sum are
+     the most preferred.
+
+   requiredDuringSchedulingIgnoredDuringExecution	<Object>
+     If the affinity requirements specified by this field are not met at
+     scheduling time, the pod will not be scheduled onto the node. If the
+     affinity requirements specified by this field cease to be met at some point
+     during pod execution (e.g. due to an update), the system may or may not try
+     to eventually evict the pod from its node.
+```
+
++ `requiredDuringSchedulingIgnoredDuringExecution`: node节点必须满足指定的所有规则才可以调度，硬限制；如果找不到符合条件的node，则调度失败
+
+  ```
+  #属性：
+  nodeSelectorTerms    节点选择列表
+    matchFields        按节点字段列出条件
+    matchExpressions   按节点标签列出的节点选择器要求列表
+      key
+      values
+      operator         关系符  支持Exists, DoesNotExists, In, NotIn, Gt, Lt
+  
+  #示例：
+  - matchExpressions:
+    - key: nodeenv        匹配打有key=nodeenv标签的节点
+      operator: Exists
+    - key: nodeenv        匹配打有key=nodeenv标签，并且value值是"test"或者"dev"的节点
+      operator: In
+      values: ["test", "dev"]   
+    - key: nodeenv        匹配打有key=nodeenv标签，并且value值大于"xx"的节点
+      operator: Gt
+      values: "xx" 
+  ```
+
++ `preferredDuringSchedulingIgnoredDuringExecution`: 优先调度到满足指定规则的节点上，如果没有找到，则选择集群中的一个node进行调度
+
+  ```
+  #属性
+  preference         节点选择器与相应的权重相关联
+    matchFields        按节点字段列出条件
+    matchExpressions   按节点标签列出的节点选择器要求列表
+      key
+      values
+      operator         关系符  支持Exists, DoesNotExists, In, NotIn, Gt, Lt
+  weight     倾向权重，取值范围为1-100
+  ```
+
+yaml文件编写示例：
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+  namespace: dev
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:1.18.0
+      ports:
+      - name: nginx-port
+        containerPort: 80
+        protocol: TCP
+  nodeName: k8s-master
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        preference:
+          - matchExpressions:
+            - key: nodeenv
+              operator: In
+              values: ["test", "dev"]
+        weight: 10
+```
+
+
+
+> **NodeAffinity**规则设置的注意事项
+>
+> + 如果同时定义了nodeSelector和nodeAffinity，那么必须两个条件都满足，pod才能运行在指定的node上
+> + 如果nodeAffinity指定了多个nodeSelectorTerms，那么只需要满足其中一个term即可
+> + 如果一个nodeSelectorTerms中有多个matchExpressions，则一个节点必须满足所有matchExpression中的条件才能匹配成功
+> + 如果一个pod所在的node在pod运行期间发生了变化，不再符合pod原先定义的要求，则系统会忽略该变化
+
+
+
+**podAffinity**
+
+```powershell
+[root@k8s-master kubernetes]# kubectl explain pod.spec.affinity.podAffinity
+
+FIELDS:
+   preferredDuringSchedulingIgnoredDuringExecution	<[]Object>
+     The scheduler will prefer to schedule pods to nodes that satisfy the
+     affinity expressions specified by this field, but it may choose a node that
+     violates one or more of the expressions. The node that is most preferred is
+     the one with the greatest sum of weights, i.e. for each node that meets all
+     of the scheduling requirements (resource request, requiredDuringScheduling
+     affinity expressions, etc.), compute a sum by iterating through the
+     elements of this field and adding "weight" to the sum if the node has pods
+     which matches the corresponding podAffinityTerm; the node(s) with the
+     highest sum are the most preferred.
+
+   requiredDuringSchedulingIgnoredDuringExecution	<[]Object>
+     If the affinity requirements specified by this field are not met at
+     scheduling time, the pod will not be scheduled onto the node. If the
+     affinity requirements specified by this field cease to be met at some point
+     during pod execution (e.g. due to a pod label update), the system may or
+     may not try to eventually evict the pod from its node. When there are
+     multiple elements, the lists of nodes corresponding to each podAffinityTerm
+     are intersected, i.e. all terms must be satisfied.
+```
+
++ `requiredDuringSchedulingIgnoredDuringExecution`: 硬限制
+
+  ```
+  #属性
+  namespace            指定参照pod的namespace
+  topologyKey          指定调度作用域
+  labelSelector        pod标签选择器        
+    matchExpressions   
+      key
+      values
+      operator         
+    matchLabels
+  ```
+
++ `preferredDuringSchedulingIgnoredDuringExecution`: 软限制
+
+  ```
+  #属性
+  podAffinityTerm
+      namespace            指定参照pod的namespace
+      topologyKey          指定调度作用域
+      labelSelector        pod标签选择器        
+        matchExpressions   
+          key
+          values
+          operator         
+        matchLabels
+  weight
+  ```
+
+  
+
+> `topologyKey`用于指定调度时作用域，例如：
+>
+> + 如果指定为`kubernetes.io/hostname`，就是以node节点为区分范围
+> + 如果指定为`beta.kubernetes.io/os`，则以node节点的操作系统类型来区分
+
+
+
+#### 4.5.3 污点和容忍
+
+当集群中的节点被设置上污点之后，就和pod之前存在了一种相斥关系，进而拒绝pod调度进来，甚至可以将已经存在的pod驱逐出去
+
+污点的格式：`key=value:effect`，key和value是污点的标签，effect描述污点的作用，当前支持三种选项：
+
++ `PreNoSchedule`：k8s将尽量避免把pod调度到具有该污点的node上，除非没有其他节点可调度
++ `NoSchedule`：k8s将不会把pod调度到具有该污点的node上，但不会影响当前node上已经存在的pod
++ `NoExecute`：k8s将不会把pod调度到具有该污点的node上，同时也会将node上已经存在的pod驱离
+
+<img src="./assets/image-20240721101348405.png" alt="image-20240721101348405" style="zoom:80%;" />
+
+> 搭建k8s集群的时候，会默认给master节点设置一个污点，可以通过`kubectl describe node master`命令查看
+>
+> ```
+> Taints:             node-role.kubernetes.io/master:NoSchedule
+> ```
+>
+> 所以，每次调度的时候都只会向从节点上部署pod
+
+
+
+污点命令：
+
+```powershell
+#设置污点  kubectl taint nodes nodeName key=value:effect
+[root@k8s-master kubernetes]# kubectl taint nodes node1 tag=test:NoSchedule
+
+#删除污点 kubectl taint nodes nodeName key:effect-
+[root@k8s-master kubernetes]# kubectl taint nodes node1 tag:NoSchedule-
+
+#删除所有污点 kubectl taint nodes nodeName key-
+[root@k8s-master kubernetes]# kubectl taint nodes node1 tag-
+```
+
+**容忍**
+
+如果一个节点上有污点，但是pod仍然希望被调度到该node上，这就需要使用到容忍
+
+<img src="./assets/image-20240721102625314.png" alt="image-20240721102625314" style="zoom:80%;" />
+
+> 污点就是拒绝，容忍就是忽略，node通过污点拒绝pod调度上去，pod通过容忍忽略拒绝
+
+
+
+```powershell
+[root@k8s-master kubernetes]# kubectl explain pod.spec.tolerations
+
+FIELDS:
+   effect	<string>      #污点的规则，必须与标签的污点规则相同
+     Effect indicates the taint effect to match. Empty means match all taint
+     effects. When specified, allowed values are NoSchedule, PreferNoSchedule
+     and NoExecute.
+
+   key	<string>          #要容忍的污点的key
+     Key is the taint key that the toleration applies to. Empty means match all
+     taint keys. If the key is empty, operator must be Exists; this combination
+     means to match all values and all keys.
+
+   operator	<string>      #操作符
+     Operator represents a key's relationship to the value. Valid operators are
+     Exists and Equal. Defaults to Equal. Exists is equivalent to wildcard for
+     value, so that a pod can tolerate all taints of a particular category.
+
+   tolerationSeconds	<integer>     #当设置为NoExecute时pod在当前节点上停留的时间 
+     TolerationSeconds represents the period of time the toleration (which must
+     be of effect NoExecute, otherwise this field is ignored) tolerates the
+     taint. By default, it is not set, which means tolerate the taint forever
+     (do not evict). Zero and negative values will be treated as 0 (evict
+     immediately) by the system.
+
+   value	<string>     # 容忍污点的value
+     Value is the taint value the toleration matches to. If the operator is
+     Exists, the value should be empty, otherwise just a regular string.
+```
+
+
+
+### 4.6 Pod控制器
+
+在k8s中，按照pod的创建方式可以将其分为两类：
+
++ **自主式pod**：k8s直接创建出来的pod，这种pod删除后就没有了，不会自动重建
++ **控制器创建的pod**：通过控制器创建的pod，这种pod删除了之后还会自动重建
+
+> pod控制器是管理pod的中间层，使用了pod控制器之后，只需要告诉pod控制器想要多少的pod，它就会创建出满足条件的pod并确保每一个pod处于用户期望的状态，如果pod在运行中出现故障，控制器会基于指定策略重启或重建pod
+
+一些常见的pod控制器：
+
+- `ReplicationController`：比较原始的Pod控制器，已经被废弃，由ReplicaSet替代。
+
+- `ReplicaSet`：保证指定数量的Pod运行，并支持Pod数量变更，镜像版本变更。
+
+- `Deployment`：通过控制ReplicaSet来控制Pod，并支持滚动升级、版本回退。
+
+- `Horizontal Pod Autoscaler`：可以根据集群负载自动调整Pod的数量，实现削峰填谷。
+
+- `DaemonSet`：在集群中的指定Node上都运行一个副本，一般用于守护进程类的任务。
+
+- `Job`：它创建出来的Pod只要完成任务就立即退出，用于执行一次性任务。
+
+- `CronJob`：它创建的Pod会周期性的执行，用于执行周期性的任务。
+
+- `StatefulSet`：管理有状态的应用。
+
+#### 4.6.1 ReplicaSet
+
+ReplicaSet控制器的主要作用是保证一定数量的pod能够正常运行，它会持续监听这些pod的运行状态，一旦pod发生故障，就会重启或重建，同时它还支持对pod数量的扩缩容和版本镜像的升级
+
+<img src="./assets/image-20240721104542646.png" alt="image-20240721104542646" style="zoom:80%;" />
+
+RS配置结构：
+
+```yaml
+apiVersion: apps/v1 # 版本号 
+kind: ReplicaSet # 类型 
+metadata: # 元数据 
+  name: # rs名称
+  namespace: # 所属命名空间 
+  labels: #标签 
+    controller: rs 
+spec: # 详情描述 
+  replicas: 3 # 副本数量 
+  selector: # 选择器，通过它指定该控制器管理哪些pod
+    matchLabels: # Labels匹配规则   与template中的labels对应
+      app: nginx-pod 
+    matchExpressions: # Expressions匹配规则 
+      - {key: app, operator: In, values: [nginx-pod]} 
+template: # 模板，当副本数量不足时，会根据下面的模板创建pod副本 
+  metadata: 
+    labels: 
+      app: nginx-pod 
+  spec:     #定义的pod
+    containers: 
+      - name: nginx 
+        image: nginx:1.17.1 
+        ports: 
+        - containerPort: 80
+```
+
+- replicas：指定副本数量，其实就是当然rs创建出来的Pod的数量，默认为1.
+
+- selector：选择器，它的作用是建立Pod控制器和Pod之间的关联关系，采用了Label Selector机制（在Pod模块上定义Label，在控制器上定义选择器，就可以表明当前控制器能管理哪些Pod了）。
+
+- template：模板，就是当前控制器创建Pod所使用的模板，里面其实就是前面学过的Pod的定义。
+
+**创建rs控制器**
+
+```yaml
+apiVersion: apps/v1 # 版本号
+kind: ReplicaSet # 类型
+metadata: # 元数据
+  name: pc-replicaset # rs名称
+  namespace: dev # 命名类型
+spec: # 详细描述
+  replicas: 3 # 副本数量
+  selector: # 选择器，通过它指定该控制器可以管理哪些Pod
+    matchLabels: # Labels匹配规则
+      app: nginx-pod
+  template: # 模块 当副本数据不足的时候，会根据下面的模板创建Pod副本
+    metadata:
+      labels:
+        app: nginx-pod
+    spec:
+      containers:
+        - name: nginx # 容器名称
+          image: nginx:1.17.1 # 容器需要的镜像地址
+          ports:
+            - containerPort: 80 # 容器所监听的端口
+```
+
+```powershell
+[root@k8s-master kubernetes]# kubectl create -f pc-replicaset.yaml 
+replicaset.apps/pc-replicaset created
+
+#查看创建的replicaSet
+# DESIRED   期望的pod数量
+# CURRENT   当前的pod数量
+# READY     已经就绪的pod数量
+[root@k8s-master kubernetes]# kubectl get rs -n dev -o wide
+NAME            DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES         SELECTOR
+pc-replicaset   3         3         3       33s   nginx        nginx:1.17.1   app=nginx-pod
+
+#查看控制器创建的pod
+[root@k8s-master kubernetes]# kubectl get pod -n dev
+NAME                  READY   STATUS    RESTARTS   AGE
+pc-replicaset-2ww2k   1/1     Running   0          114s
+pc-replicaset-rm58k   1/1     Running   0          114s
+pc-replicaset-v7wlt   1/1     Running   0          114s
+```
+
+**pod的扩缩容**
+
+```powershell
+#编辑rs副本数量，修改spec.replicas即可
+[root@k8s-master kubernetes]# kubectl edit rs pc-replicaset -n dev
+replicaset.apps/pc-replicaset edited
+
+[root@k8s-master kubernetes]# kubectl get rs -n dev -o wide
+NAME            DESIRED   CURRENT   READY   AGE     CONTAINERS   IMAGES         SELECTOR
+pc-replicaset   5         5         5       4m37s   nginx        nginx:1.17.1   app=nginx-pod
+
+[root@k8s-master kubernetes]# kubectl get pod -n dev
+NAME                  READY   STATUS    RESTARTS   AGE
+pc-replicaset-2ww2k   1/1     Running   0          4m51s
+pc-replicaset-mqfxw   1/1     Running   0          56s
+pc-replicaset-rm58k   1/1     Running   0          4m51s
+pc-replicaset-v7wlt   1/1     Running   0          4m51s
+pc-replicaset-ztfx7   1/1     Running   0          56s
+
+
+#也可以通过命令实现
+[root@k8s-master kubernetes]# kubectl scale rs pc-replicaset --replicas=2 -n dev
+replicaset.apps/pc-replicaset scaled
+
+[root@k8s-master kubernetes]# kubectl get pod -n dev
+NAME                  READY   STATUS    RESTARTS   AGE
+pc-replicaset-2ww2k   1/1     Running   0          6m11s
+pc-replicaset-rm58k   1/1     Running   0          6m11s
+```
+
+**镜像升降级**
+
+```powershell
+#编辑rs的容器镜像版本
+[root@k8s-master kubernetes]# kubectl edit rs pc-replicaset -n dev
+replicaset.apps/pc-replicaset edited
+
+[root@k8s-master kubernetes]# kubectl get rs -n dev -o wide
+NAME            DESIRED   CURRENT   READY   AGE     CONTAINERS   IMAGES         SELECTOR
+pc-replicaset   2         2         2       8m53s   nginx        nginx:1.18.0   app=nginx-pod
+
+#也可以通过命令完成
+[root@k8s-master kubernetes]# kubectl set image rs pc-replicaset nginx=nginx:1.17.1 -n dev
+replicaset.apps/pc-replicaset image updated
+
+[root@k8s-master kubernetes]# kubectl get rs -n dev -o wide
+NAME            DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES         SELECTOR
+pc-replicaset   2         2         2       10m   nginx        nginx:1.17.1   app=nginx-pod
+```
+
+**删除ReplicaSet**
+
+```powershell
+[root@k8s-master kubernetes]# kubectl delete -f pc-replicaset.yaml 
+replicaset.apps "pc-replicaset" deleted
+
+[root@k8s-master kubernetes]# kubectl get rs -n dev -o wide
+No resources found in dev namespace.
+```
+
+#### 4.6.2 Deployment
+
+为了更好的解决服务编排问题，k8s在v1.2版本开始，引入了Deployment控制器，这种控制器并不直接管理pod，而是通过管理replicaSet来间接管理pod
+
+<img src="./assets/image-20240727080745613.png" alt="image-20240727080745613" style="zoom:80%;" />
+
+Deployment主要功能有下面几个：
+
++ 支持ReplicaSet的所有功能
++ 支持发布的停止，继续
++ 支持版本滚动更新和版本回退
+
+```powershell
+[root@k8s-master ~]# kubectl explain deploy.spec
+KIND:     Deployment
+VERSION:  apps/v1
+
+RESOURCE: spec <Object>
+
+DESCRIPTION:
+     Specification of the desired behavior of the Deployment.
+
+     DeploymentSpec is the specification of the desired behavior of the
+     Deployment.
+
+FIELDS:
+   minReadySeconds	<integer>
+     Minimum number of seconds for which a newly created pod should be ready
+     without any of its container crashing, for it to be considered available.
+     Defaults to 0 (pod will be considered available as soon as it is ready)
+
+   paused	<boolean>
+     Indicates that the deployment is paused.
+
+   progressDeadlineSeconds	<integer>
+     The maximum time in seconds for a deployment to make progress before it is
+     considered to be failed. The deployment controller will continue to process
+     failed deployments and a condition with a ProgressDeadlineExceeded reason
+     will be surfaced in the deployment status. Note that progress will not be
+     estimated during the time a deployment is paused. Defaults to 600s.
+
+   replicas	<integer>
+     Number of desired pods. This is a pointer to distinguish between explicit
+     zero and not specified. Defaults to 1.
+
+   revisionHistoryLimit	<integer>
+     The number of old ReplicaSets to retain to allow rollback. This is a
+     pointer to distinguish between explicit zero and not specified. Defaults to
+     10.
+
+   selector	<Object> -required-
+     Label selector for pods. Existing ReplicaSets whose pods are selected by
+     this will be the ones affected by this deployment. It must match the pod
+     template's labels.
+
+   strategy	<Object>
+     The deployment strategy to use to replace existing pods with new ones.
+
+   template	<Object> -required-
+     Template describes the pods that will be created.
+```
+
+Deployment的yaml配置结构：
+
+```yaml
+apiVersion: apps/v1 # 版本号 
+kind: Deployment # 类型 
+metadata: # 元数据 
+  name: # rs名称 
+  namespace: # 所属命名空间 
+  labels: #标签 
+    controller: deploy 
+spec: # 详情描述 
+  replicas: 3 # 副本数量 
+  revisionHistoryLimit: 3 # 保留历史版本，默认为10 
+  paused: false # 暂停部署，默认是false 
+  progressDeadlineSeconds: 600 # 部署超时时间（s），默认是600 
+  strategy: # 策略 
+    type: RollingUpdate # 滚动更新策略 
+    rollingUpdate: # 滚动更新 
+      maxSurge: 30% # 最大额外可以存在的副本数，可以为百分比，也可以为整数 maxUnavailable: 30% # 最大不可用状态的    Pod 的最大值，可以为百分比，也可以为整数 
+  selector: # 选择器，通过它指定该控制器管理哪些pod 
+    matchLabels: # Labels匹配规则 
+      app: nginx-pod 
+    matchExpressions: # Expressions匹配规则 
+      - {key: app, operator: In, values: [nginx-pod]} 
+  template: # 模板，当副本数量不足时，会根据下面的模板创建pod副本 
+    metadata: 
+      labels: 
+        app: nginx-pod 
+    spec: 
+      containers: 
+      - name: nginx 
+        image: nginx:1.17.1 
+        ports: 
+        - containerPort: 80
+```
+
+创建一个deployment
+
+```yaml
+apiVersion: apps/v1 # 版本号 
+kind: Deployment # 类型 
+metadata: # 元数据 
+  name: pc-deployment # rs名称 
+  namespace: dev # 所属命名空间 
+spec: # 详情描述 
+  replicas: 3 # 副本数量 
+  selector: # 选择器，通过它指定该控制器管理哪些pod 
+    matchLabels: # Labels匹配规则 
+      app: nginx-pod 
+  template: # 模板，当副本数量不足时，会根据下面的模板创建pod副本 
+    metadata: 
+      labels: 
+        app: nginx-pod 
+    spec: 
+      containers: 
+      - name: nginx 
+        image: nginx:1.17.1 
+        ports: 
+        - containerPort: 80
+```
+
+```powershell
+[root@k8s-master kubernetes]# kubectl create -f pc-deployment.yaml 
+deployment.apps/pc-deployment created
+
+#查看deployment
+# UP-TO-DATE  最新版本的pod数量
+# AVAILABLE   当前可用的pod数量
+[root@k8s-master kubernetes]# kubectl get deploy -n dev -o wide
+NAME            READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS   IMAGES         SELECTOR
+pc-deployment   3/3     3            3           4m10s   nginx        nginx:1.17.1   app=nginx-pod
+
+#查看deployment管理的rs
+[root@k8s-master kubernetes]# kubectl get rs -n dev -o wide
+NAME                       DESIRED   CURRENT   READY   AGE     CONTAINERS   IMAGES         SELECTOR
+pc-deployment-5ffc5bf56c   0         0         0       6m12s   nginx        nginx:1.17.1   app=nginx-pod,pod-template-hash=5ffc5bf56c
+pc-deployment-85455f8b64   3         3         3       2m23s   nginx        nginx:1.17.1   app=nginx-pod,pod-template-hash=85455f8b64
+```
+
+deployment的扩缩容
+
+```powershell
+#命令扩容
+[root@k8s-master kubernetes]# kubectl scale deploy pc-deployment --replicas=5 -n dev
+deployment.apps/pc-deployment scaled
+[root@k8s-master kubernetes]# kubectl get pod -n dev
+NAME                             READY   STATUS              RESTARTS   AGE
+pc-deployment-85455f8b64-6skpk   1/1     Running             0          4m34s
+pc-deployment-85455f8b64-6sspq   0/1     ContainerCreating   0          3s
+pc-deployment-85455f8b64-s6p8b   1/1     Running             0          4m41s
+pc-deployment-85455f8b64-tzv7z   0/1     ContainerCreating   0          3s
+pc-deployment-85455f8b64-vv2q6   1/1     Running             0          4m27s
+
+#edit命令扩缩容
+[root@k8s-master kubernetes]# kubectl edit deploy -n dev
+deployment.apps/pc-deployment edited
+[root@k8s-master kubernetes]# kubectl get pod -n dev
+NAME                             READY   STATUS    RESTARTS   AGE
+pc-deployment-85455f8b64-6skpk   1/1     Running   0          6m3s
+pc-deployment-85455f8b64-s6p8b   1/1     Running   0          6m10s
+```
+
+deployment更新策略
+
+deployment支持两种镜像更新策略：`重建更新`和`滚动更新(默认)`，可以通过strategy选项进行配置
+
+ ```yaml
+ strategy:   #指定新的pod替换策略，支持两个属性：
+   type:   #指定策略类型
+     Recreate    #在创建出新的pod之前会先停止已经存在的所有pod
+     RollingUpdate   #滚动更新，停止一部分pod，启动一部分新pod，在更新过程中，存在两个版本的pod
+   rollingUpdate:  #当type=RollingUpdate时生效，用于为RollingUpdate设置参数
+     maxUnavailable    #用来指定在升级过程中不可用pod的最大占比，默认为25%
+     maxSurge          #用来指定在升级过程中可以超过期望的pod的最大数量，默认为25%
+ ```
+
+
+
+```yaml
+apiVersion: apps/v1 # 版本号 
+kind: Deployment # 类型 
+metadata: # 元数据 
+  name: pc-deployment # rs名称 
+  namespace: dev # 所属命名空间 
+spec: # 详情描述 
+  replicas: 4 # 副本数量 
+  selector: # 选择器，通过它指定该控制器管理哪些pod 
+    matchLabels: # Labels匹配规则 
+      app: nginx-pod
+  strategy:
+    type: RollingUpdate     #设置镜像更新策略为滚动更新
+    rollingUpdate:
+      maxUnavailable: 25%
+  template: # 模板，当副本数量不足时，会根据下面的模板创建pod副本 
+    metadata:
+      labels:
+        app: nginx-pod
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.17.1
+        ports:
+        - containerPort: 80
+      nodeName: k8s-master
+```
+
+```powershell
+#更新镜像，观察pod状态
+[root@k8s-master kubernetes]# kubectl set image deploy pc-deployment nginx=nginx:1.18.0 -n dev
+deployment.apps/pc-deployment image updated
+
+[root@k8s-master ~]# kubectl get pod -n dev -w
+NAME                             READY   STATUS    RESTARTS   AGE
+pc-deployment-85455f8b64-66w97   1/1     Running   0          3m49s
+pc-deployment-85455f8b64-6skpk   1/1     Running   0          37m
+pc-deployment-85455f8b64-ptjj4   1/1     Running   0          3m49s
+pc-deployment-85455f8b64-s6p8b   1/1     Running   0          38m
+pc-deployment-7847b6bf58-8ff4s   0/1     Pending   0          0s
+pc-deployment-85455f8b64-66w97   1/1     Terminating   0          3m55s     #先停止一个
+pc-deployment-7847b6bf58-2r45j   0/1     Pending       0          0s
+pc-deployment-7847b6bf58-8ff4s   0/1     ContainerCreating   0          0s   #再创建一个
+pc-deployment-7847b6bf58-2r45j   0/1     ContainerCreating   0          0s
+pc-deployment-85455f8b64-66w97   1/1     Terminating         0          3m55s
+pc-deployment-85455f8b64-66w97   0/1     Terminating         0          3m58s
+pc-deployment-7847b6bf58-8ff4s   0/1     ContainerCreating   0          5s
+pc-deployment-85455f8b64-66w97   0/1     Terminating         0          4m
+pc-deployment-85455f8b64-66w97   0/1     Terminating         0          4m
+pc-deployment-7847b6bf58-2r45j   0/1     ContainerCreating   0          7s
+pc-deployment-7847b6bf58-8ff4s   1/1     Running             0          8s
+pc-deployment-7847b6bf58-2r45j   1/1     Running             0          9s
+pc-deployment-85455f8b64-6skpk   1/1     Terminating         0          38m
+pc-deployment-85455f8b64-ptjj4   1/1     Terminating         0          4m4s
+pc-deployment-7847b6bf58-b7h57   0/1     Pending             0          0s
+pc-deployment-7847b6bf58-thfjl   0/1     Pending             0          0s
+pc-deployment-7847b6bf58-b7h57   0/1     ContainerCreating   0          1s
+pc-deployment-7847b6bf58-thfjl   0/1     ContainerCreating   0          1s
+pc-deployment-85455f8b64-6skpk   1/1     Terminating         0          38m
+pc-deployment-85455f8b64-ptjj4   1/1     Terminating         0          4m6s
+pc-deployment-7847b6bf58-b7h57   0/1     ContainerCreating   0          7s
+pc-deployment-7847b6bf58-thfjl   0/1     ContainerCreating   0          7s
+pc-deployment-85455f8b64-ptjj4   0/1     Terminating         0          4m12s
+pc-deployment-7847b6bf58-thfjl   1/1     Running             0          9s
+pc-deployment-85455f8b64-6skpk   0/1     Terminating         0          38m
+pc-deployment-7847b6bf58-b7h57   1/1     Running             0          9s
+pc-deployment-85455f8b64-s6p8b   1/1     Terminating         0          38m
+pc-deployment-85455f8b64-s6p8b   1/1     Terminating         0          38m
+pc-deployment-85455f8b64-s6p8b   0/1     Terminating         0          38m
+pc-deployment-85455f8b64-s6p8b   0/1     Terminating         0          38m
+pc-deployment-85455f8b64-s6p8b   0/1     Terminating         0          38m
+pc-deployment-85455f8b64-6skpk   0/1     Terminating         0          38m
+pc-deployment-85455f8b64-6skpk   0/1     Terminating         0          38m
+pc-deployment-85455f8b64-ptjj4   0/1     Terminating         0          4m17s
+pc-deployment-85455f8b64-ptjj4   0/1     Terminating         0          4m17s
+
+#最终四个镜像全部启动，并且为最新版本的镜像
+[root@k8s-master ~]# kubectl get pod -n dev 
+NAME                             READY   STATUS    RESTARTS   AGE
+pc-deployment-7847b6bf58-2r45j   1/1     Running   0          3m2s
+pc-deployment-7847b6bf58-8ff4s   1/1     Running   0          3m2s
+pc-deployment-7847b6bf58-b7h57   1/1     Running   0          2m53s
+pc-deployment-7847b6bf58-thfjl   1/1     Running   0          2m53s
+```
+
+deployment滚动更新过程
+
+<img src="./assets/image-20240727090248860.png" alt="image-20240727090248860" style="zoom:80%;" />
+
+
+
+deployment版本回退
+
+```powershell
+#镜像更新时rs的变化，原来的RS仍然存在，pod的数量变为0，产生了一个新的rs，pod数量为3
+[root@k8s-master kubernetes]# kubectl set image deploy pc-deployment nginx=nginx:1.18.0 -n dev
+deployment.apps/pc-deployment image updated
+[root@k8s-master kubernetes]# kubectl get rs -n dev
+NAME                       DESIRED   CURRENT   READY   AGE
+pc-deployment-7847b6bf58   4         4         4       12s
+pc-deployment-85455f8b64   0         0         0       86s
+```
+
+deployment支持版本升级过程中的暂停，继续功能以及版本回退等诸多功能
+
+命令：`kubectl rollout`   版本升级相关功能，支持如下选项
+
++ `status`：显示当前升级状态
++ `history`：显示升级历史记录
++ `pause`：暂停版本升级过程
++ `resume`：继续已经暂停的版本升级过程
++ `restart`：重启版本升级过程
++ `undo`：回滚到上一级版本(可以使用`--to-revision`回滚到指定版本)
+
+```powershell
+[root@k8s-master kubernetes]# kubectl rollout status deploy pc-deployment -n dev
+deployment "pc-deployment" successfully rolled out
+#如果在CHANGE-CAUSE无历史记录，需要在deploy启动的时候加上--record参数
+[root@k8s-master kubernetes]# kubectl rollout history deploy pc-deployment -n dev
+deployment.apps/pc-deployment 
+REVISION  CHANGE-CAUSE
+1         <none>
+2         <none>
+
+#正常显示
+[root@k8s-master kubernetes]# kubectl rollout history deploy pc-deployment -n dev
+deployment.apps/pc-deployment 
+REVISION  CHANGE-CAUSE
+1         kubectl create --filename=pc-deployment.yaml --record=true
+2         kubectl create --filename=pc-deployment.yaml --record=true
+
+#版本回退
+[root@k8s-master kubernetes]# kubectl rollout undo deploy pc-deployment -n dev
+deployment.apps/pc-deployment rolled back
+
+
+#查看rs和deployment
+[root@k8s-master kubernetes]# kubectl get deploy,rs -n dev -o wide
+NAME                            READY   UP-TO-DATE   AVAILABLE   AGE     CONTAINERS   IMAGES         SELECTOR
+deployment.apps/pc-deployment   4/4     4            4           2m14s   nginx        nginx:1.17.1   app=nginx-pod
+
+NAME                                       DESIRED   CURRENT   READY   AGE     CONTAINERS   IMAGES         SELECTOR
+replicaset.apps/pc-deployment-7847b6bf58   0         0         0       119s    nginx        nginx:1.18.0   app=nginx-pod,pod-template-hash=7847b6bf58
+replicaset.apps/pc-deployment-85455f8b64   4         4         4       2m14s   nginx        nginx:1.17.1   app=nginx-pod,pod-template-hash=85455f8b64
+
+#查看历史，1版本已经不存在了
+[root@k8s-master kubernetes]# kubectl rollout history deploy pc-deployment -n dev
+deployment.apps/pc-deployment 
+REVISION  CHANGE-CAUSE
+2         kubectl create --filename=pc-deployment.yaml --record=true
+3         kubectl create --filename=pc-deployment.yaml --record=true
+```
+
+**金丝雀发布**
+
+deployment支持更新过程中的控制，如暂停或继续更新
+
+比如有一批新的pod资源创建完成后立即暂停更新过程，此时，仅存在一部分新版本的应用，主题部分还是旧的版本，然后，再筛选一小部分的用户请求路由到新版本的pod应用，继续观察能否稳定地按期望的方式运行，确定没问题之后再继续完成余下的pod资源滚动更新，否则立即回滚更新操作，这就是金丝雀发布
+
+
+
+#### 4.6.3 HPA
+
+HPA(Horizontal Pod Autoscaler) 可以获取每个pod的资源利用率，然后和HPA中定义的指标进行对比，同时计算出需要伸缩的具体值，最后实现pod数量的调整，HPA与deployment一样，也属于k8s的资源对象，通过追踪分析目标pod的负载变化情况，来确定是否需要针对性地调整目标pod的副本数
+
+<img src="./assets/image-20240727093439624.png" alt="image-20240727093439624" style="zoom:80%;" />
+
+#### 4.6.4 DaemonSet
+
+DaemonSet类型的控制器可以保证集群中的每一台(或指定)节点上都运行一个副本，一般适用于日志收集，节点监控的场景，也就是说，如果一个pod提供的功能是节点级别的(每个node都需要且只需要一个)，那么这类pod就是和使用Daemon类型的控制器创建
+
+<img src="./assets/image-20240728084943193.png" alt="image-20240728084943193" style="zoom:80%;" />
+
+DaemonSet控制器的特点：
+
++ 每当向集群中添加一个节点时，指定的pod副本也将添加到该节点上
++ 当节点从集群中移除，pod也就会被回收
+
+#### 4.6.5 Job
+
+Job主要用于负责批量处理(一次要处理指定数量的任务)短暂的一次性(每个任务仅运行一次就结束)任务
+
++ 当Job创建的pod执行成功结束时，Job将记录成功结束的pod数量
++ 当成功结束的pod达到指定的数量时，Job完成执行
+
+<img src="./assets/image-20240728090335714.png" alt="image-20240728090335714" style="zoom:80%;" />
+
+Job配置文件
+
+```yaml
+apiVersion: batch/v1 # 版本号
+kind: Job # 类型
+metadata: # 元数据
+  name:  # 名称
+  namespace:  #命名空间
+  labels: # 标签
+    controller: job
+spec: # 详情描述
+  completions: 1 # 指定Job需要成功运行Pod的总次数，默认为1
+  parallelism: 1 # 指定Job在任一时刻应该并发运行Pod的数量，默认为1
+  activeDeadlineSeconds: 30 # 指定Job可以运行的时间期限，超过时间还没结束，系统将会尝试进行终止
+  backoffLimit: 6 # 指定Job失败后进行重试的次数，默认为6
+  manualSelector: true # 是否可以使用selector选择器选择Pod，默认为false
+  selector: # 选择器，通过它指定该控制器管理那些Pod
+    matchLabels: # Labels匹配规则
+      app: counter-pod
+    matchExpressions: # Expressions匹配规则
+      - key: app
+        operator: In
+        values:
+          - counter-pod
+  template: # 模板，当副本数量不足时，会根据下面的模板创建Pod模板
+     metadata:
+       labels:
+         app: counter-pod
+     spec:
+       restartPolicy: Never # 重启策略只能设置为Never或OnFailure
+       containers:
+         - name: counter
+           image: busybox:1.30
+           command: ["/bin/sh","-c","for i in 9 8 7 6 5 4 3 2 1;do echo $i;sleep 20;done"]
+```
+
+> 关于模板中的重启策略的说明：
+>
+> - 如果设置为OnFailure，则Job会在Pod出现故障的时候重启容器，而不是创建Pod，failed次数不变。
+>
+> - 如果设置为Never，则Job会在Pod出现故障的时候创建新的Pod，并且故障Pod不会消失，也不会重启，failed次数+1。
+>
+> - 如果指定为Always的话，就意味着一直重启，意味着Pod任务会重复执行，这和Job的定义冲突，所以不能设置为Always。
+
+## 五、Service
+
+### 5.1 Service介绍
+
+在k8s中，pod是应用程序的载体，可以通过pod的ip来访问应用程序，但是pod的ip地址是不固定的，所以不方便直接采用pod的ip对服务进行访问
+
+为了解决这个问题，k8s提供了service资源，service会对提供同一个服务的多个pod进行聚合，并且提供一个统一的入口地址，通过访问service的入口地址就能访问到后面的pod服务
+
+<img src="./assets/image-20240728091014025.png" alt="image-20240728091014025" style="zoom:80%;" />
+
+service在很多情况下只是一个概念，真正起作用的是kube-proxy服务，每个node节点上都运行着一个kube-proxy服务，当创建service时，会通过api-server向etcd写入创建的service信息，而kube-proxy会基于监听的机制发现这种service的变动，然后它会将最新的service信息转换成对应的访问规则
+
+<img src="./assets/image-20240728091244042.png" alt="image-20240728091244042" style="zoom:80%;" />
+
+```powershell
+[root@k8s-master ~]# ipvsadm -Ln
+# 10.97.97.97:80 是service提供的访问入口
+# 当访问这个入口的时候，可以发现后面有三个pod的服务在等待调用，
+# kube-proxy会基于rr（轮询）的策略，将请求分发到其中一个pod上去
+# 这个规则会同时在集群内的所有节点上都生成，所以在任何一个节点上访问都可以。
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+ -> RemoteAddress:Port  Forward Weight ActiveConn InActConn
+ TCP 10.97.97.97:80 rr
+  -> 10.244.1.39:80   Masq  1  0  0
+  -> 10.244.1.40:80   Masq  1  0  0
+  -> 10.244.2.33:80   Masq  1  0  0
+```
+
+**kube-proxy工作模式**
+
++ `userspace模式`：kube-proxy会为每一个service创建一个监听端口，发向Cluster Ip的请求被iptables规则重定向到kube-proxy监听的端口上，kube-proxy根据LB算法选择一个提供服务的pod并和其建立链接，以将请求转发到pod上
+
+  该模式下，kube-proxy充当了一个四层负载均衡器的角色，由于kube-proxy运行在用户空间下，在进行转发处理时，会增加内核和用户空间之间的数据拷贝，虽然比较稳定，但是效率较低
+
+  <img src="./assets/image-20240728092647524.png" alt="image-20240728092647524" style="zoom:80%;" />
+
++ `iptables模式`：iptables模式下，kube-proxy为service后端的每个pod创建对应的iptables规则，直接将发向Cluster IP的请求重定向到一个pod ip
+
+  该模式下kube-proxy只负责创建iptables规则，相较于userspace模式效率更高，但不能提供灵活的LB策略，当后端pod不可用时，无法进行重试
+
+  <img src="./assets/image-20240728092850321.png" alt="image-20240728092850321" style="zoom:80%;" />
+
++ `ipvs模式`：ipvs模式和iptables类似，kube-proxy监控Pod的变化并创建相应的ipvs规则。ipvs相对iptables转发效率更高，除此之外，ipvs支持更多的LB算法
+
+  <img src="./assets/image-20240728092947400.png" alt="image-20240728092947400" style="zoom:80%;" />
+
+```powershell
+#开启ipvs模式
+[root@k8s-master ~]# kubectl edit cm kube-proxy -n kube-system
+##将配置文件中的mode修改为ipvs
+configmap/kube-proxy edited
+#删除kube-proxy重启
+[root@k8s-master ~]# kubectl delete pod -l k8s-app=kube-proxy -n kube-system
+pod "kube-proxy-nq84s" deleted
+#查看规则
+[root@k8s-master ~]# ipvsadm -Ln
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  10.96.0.1:443 rr
+  -> 8.149.130.133:6443           Masq    1      0          0         
+TCP  10.96.0.10:53 rr
+  -> 192.168.235.193:53           Masq    1      0          0         
+  -> 192.168.235.194:53           Masq    1      0          0         
+TCP  10.96.0.10:9153 rr
+  -> 192.168.235.193:9153         Masq    1      0          0         
+  -> 192.168.235.194:9153         Masq    1      0          0         
+UDP  10.96.0.10:53 rr
+  -> 192.168.235.193:53           Masq    1      0          0         
+  -> 192.168.235.194:53           Masq    1      0          0
+```
+
+### 5.2 Service资源文件
+
+```yaml
+apiVersion: v1 # 版本
+kind: Service # 类型
+metadata: # 元数据
+  name: # 资源名称
+  namespace: # 命名空间
+spec:
+  selector: # 标签选择器，用于确定当前Service代理那些Pod
+    app: nginx
+  type: NodePort # Service的类型，指定Service的访问方式
+  clusterIP: # 虚拟服务的IP地址
+  sessionAffinity: # session亲和性，支持ClientIP、None两个选项，默认值为None
+  ports: # 端口信息
+    - port: 8080 # Service端口
+      protocol: TCP # 协议
+      targetPort : # Pod端口
+      nodePort:  # 主机端口
+```
+
+> `spec.type`:
+>
+> + `ClusterIP`: 默认值，是k8s系统自动分配的虚拟ip，只能在集群内部访问
+> + `NodePort`: 将Service通过指定的Node上的端口暴露给外部，通过此方法，就可以在集群外部访问服务
+> + `LoadBalancer`: 使用外接负载均衡器完成到服务的负载分发，注意此模式需要外部云环境支持
+> + `ExternalName`: 把集群外部的服务引入集群内部，直接使用
+
+### 5.3 Service的使用
+
+使用deployment创建pod
+
+```yaml
+apiVersion: apps/v1 # 版本号 
+kind: Deployment # 类型 
+metadata: # 元数据 
+  name: pc-deployment # rs名称 
+  namespace: dev # 所属命名空间 
+spec: # 详情描述 
+  replicas: 3 # 副本数量 
+  selector: # 选择器，通过它指定该控制器管理哪些pod 
+    matchLabels: # Labels匹配规则 
+      app: nginx-pod
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+  template: # 模板，当副本数量不足时，会根据下面的模板创建pod副本 
+    metadata:
+      labels:
+        app: nginx-pod
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.17.1
+        ports:
+        - containerPort: 80
+      nodeName: k8s-master
+```
+
+```powershell
+#创建deployment
+[root@k8s-master kubernetes]# kubectl create -f deployment.yaml 
+deployment.apps/pc-deployment created
+
+#查看pod
+[root@k8s-master kubernetes]# kubectl get pod -n dev -o wide
+NAME                             READY   STATUS    RESTARTS   AGE   IP                NODE         NOMINATED NODE   READINESS GATES
+pc-deployment-85455f8b64-72d6j   1/1     Running   0          9s    192.168.235.235   k8s-master   <none>           <none>
+pc-deployment-85455f8b64-njd7p   1/1     Running   0          9s    192.168.235.236   k8s-master   <none>           <none>
+pc-deployment-85455f8b64-vx8rp   1/1     Running   0          9s    192.168.235.237   k8s-master   <none>           <none>
+
+#通过pod ip访问nginx服务
+[root@k8s-master kubernetes]# curl 192.168.235.235:80
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+    body {
+        width: 35em;
+        margin: 0 auto;
+        font-family: Tahoma, Verdana, Arial, sans-serif;
+    }
+</style>
+</head>
+<body>
+<h1>Welcome to nginx!</h1>
+<p>If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.</p>
+
+<p>For online documentation and support please refer to
+<a href="http://nginx.org/">nginx.org</a>.<br/>
+Commercial support is available at
+<a href="http://nginx.com/">nginx.com</a>.</p>
+
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+
+##为了能清晰看出访问的是哪个pod，可以修改nginx的index.html
+[root@k8s-master kubernetes]# kubectl exec -it pc-deployment-85455f8b64-72d6j -n dev /bin/bash
+kubectl exec [POD] [COMMAND] is DEPRECATED and will be removed in a future version. Use kubectl exec [POD] -- [COMMAND] instead.
+root@pc-deployment-85455f8b64-72d6j:/# echo "192.168.235.235" > /usr/share/nginx/html/index.html 
+root@pc-deployment-85455f8b64-72d6j:/# exit
+exit
+[root@k8s-master kubernetes]# curl 192.168.235.235:80
+192.168.235.235
+[root@k8s-master kubernetes]# kubectl exec -it pc-deployment-85455f8b64-njd7p -n dev /bin/bash
+kubectl exec [POD] [COMMAND] is DEPRECATED and will be removed in a future version. Use kubectl exec [POD] -- [COMMAND] instead.
+root@pc-deployment-85455f8b64-njd7p:/# echo "192.168.235.236" > /usr/share/nginx/html/index.html
+root@pc-deployment-85455f8b64-njd7p:/# exit
+exit
+[root@k8s-master kubernetes]# kubectl exec -it pc-deployment-85455f8b64-vx8rp -n dev /bin/bash
+kubectl exec [POD] [COMMAND] is DEPRECATED and will be removed in a future version. Use kubectl exec [POD] -- [COMMAND] instead.
+root@pc-deployment-85455f8b64-vx8rp:/# echo "192.168.235.237" > /usr/share/nginx/html/index.html
+root@pc-deployment-85455f8b64-vx8rp:/# exit
+exit
+[root@k8s-master kubernetes]# curl 192.168.235.236:80
+192.168.235.236
+[root@k8s-master kubernetes]# curl 192.168.235.237:80
+192.168.235.237
+```
+
+#### 5.3.1 ClusterIP类型
+
+创建service-clusterIp.yaml
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-clusterip
+  namespace: dev
+spec:
+  selector:
+    app: nginx-pod
+  #clusterIP: 10.97.97.97 # service的IP地址，如果不写，默认会生成一个
+  type: ClusterIP
+  ports:
+    - port: 80 # Service的端口
+      targetPort: 80 # Pod中服务的端口
+```
+
+```powershell
+#创建service
+[root@k8s-master kubernetes]# vim service-clusterip.yaml
+[root@k8s-master kubernetes]# kubectl create -f service-clusterip.yaml 
+service/service-clusterip created
+
+#查看service
+[root@k8s-master kubernetes]# kubectl get service -n dev
+NAME                TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)   AGE
+service-clusterip   ClusterIP   10.96.194.82   <none>        80/TCP    42s
+#查看service的详细信息
+[root@k8s-master kubernetes]# kubectl describe service service-clusterip -n dev
+Name:              service-clusterip
+Namespace:         dev
+Labels:            <none>
+Annotations:       <none>
+Selector:          app=nginx-pod
+Type:              ClusterIP
+IP Families:       <none>
+IP:                10.96.194.82
+IPs:               10.96.194.82
+Port:              <unset>  80/TCP
+TargetPort:        80/TCP
+Endpoints:         192.168.235.235:80,192.168.235.236:80,192.168.235.237:80   #对应pod服务的端口
+Session Affinity:  None
+Events:            <none>
+
+#查看ipvs规则
+[root@k8s-master kubernetes]# ipvsadm -Ln
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+...
+TCP  10.96.194.82:80 rr
+  -> 192.168.235.235:80           Masq    1      0          0         
+  -> 192.168.235.236:80           Masq    1      0          0         
+  -> 192.168.235.237:80           Masq    1      0          0         
+...
+```
+
+> EndPoint：
+>
+> EndPoint是k8s中的一个资源对象，存储在etcd中，用来记录一个service对应的所有pod的访问地址，它是根据service配置文件中selector描述产生的
+>
+> 一个service由一组pod组成，这些pod通过endpoint暴露出来，endpoint是实现实际服务的端点集合，换句话说，service和pod之间的联系是通过endpoint实现的
+>
+> <img src="./assets/image-20240728100615038.png" alt="image-20240728100615038" style="zoom:80%;" />
+
+```powershell
+#轮询访问查看效果
+[root@k8s-master kubernetes]# while true; do curl 10.96.194.82:80; sleep 5; done;
+192.168.235.237
+192.168.235.236
+192.168.235.235
+192.168.235.237
+192.168.235.236
+192.168.235.235
+...
+```
+
+> 负载分发策略：对service的访问被分发到了后端的pod上去，目前k8s提供了两种负载分发策略：
+>
+> + 如果不定义，默认使用kube-proxy的策略，如轮询，随机
+> + 基于客户端地址的会话保持模式，即来自同一个客户端发起的所有请求都会转发到固定的一个pod上，此模式可以使在spec中添加`sessionAffinity: ClientIP`进行配置
