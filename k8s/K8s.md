@@ -2672,3 +2672,482 @@ TCP  10.96.194.82:80 rr
 >
 > + 如果不定义，默认使用kube-proxy的策略，如轮询，随机
 > + 基于客户端地址的会话保持模式，即来自同一个客户端发起的所有请求都会转发到固定的一个pod上，此模式可以使在spec中添加`sessionAffinity: ClientIP`进行配置
+
+#### 5.3.2 HeadLess类型
+
+在某些场景下，需要使用特定的负载均衡策略，k8s提供了headless service，这类service不会分配cluster ip，如果想要访问service，只能通过service的域名进行查询访问
+
+**创建headless service**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-headless
+  namespace: dev
+spec:
+  selector:
+    app: nginx-pod
+  clusterIP: None   #将clusterIp设置为none，即可创建headless service
+  type: ClusterIP
+  ports: 
+  - port: 80
+    targetPort: 80
+```
+
+```powershell
+[root@k8s-master kubernetes]# kubectl create -f service-headless.yaml 
+service/service-headless created
+[root@k8s-master kubernetes]# kubectl get svc -n dev
+NAME               TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+service-headless   ClusterIP   None         <none>        80/TCP    6s
+
+##查看service关联的pod
+[root@k8s-master kubernetes]# kubectl describe svc service-headless -n dev
+Name:              service-headless
+Namespace:         dev
+Labels:            <none>
+Annotations:       <none>
+Selector:          app=nginx-pod
+Type:              ClusterIP
+IP Families:       <none>
+IP:                None
+IPs:               None
+Port:              <unset>  80/TCP
+TargetPort:        80/TCP
+Endpoints:         192.168.235.245:80,192.168.235.246:80,192.168.235.247:80
+Session Affinity:  None
+Events:            <none>
+
+#查看service域名
+[root@k8s-master kubernetes]# dig @10.96.0.10 service-headless.dev.svc.cluster.local
+
+; <<>> DiG 9.11.36-RedHat-9.11.36-14.0.1.al8 <<>> @10.96.0.10 service-headless.dev.svc.cluster.local
+; (1 server found)
+;; global options: +cmd
+;; Got answer:
+;; WARNING: .local is reserved for Multicast DNS
+;; You are currently testing what happens when an mDNS query is leaked to DNS
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 25816
+;; flags: qr aa rd; QUERY: 1, ANSWER: 3, AUTHORITY: 0, ADDITIONAL: 1
+;; WARNING: recursion requested but not available
+
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 4096
+; COOKIE: 69d512e84e69861b (echoed)
+;; QUESTION SECTION:
+;service-headless.dev.svc.cluster.local.	IN A
+
+;; ANSWER SECTION:
+service-headless.dev.svc.cluster.local.	30 IN A	192.168.235.245
+service-headless.dev.svc.cluster.local.	30 IN A	192.168.235.247
+service-headless.dev.svc.cluster.local.	30 IN A	192.168.235.246
+
+;; Query time: 28 msec
+;; SERVER: 10.96.0.10#53(10.96.0.10)
+;; WHEN: Sat Aug 03 09:34:56 CST 2024
+;; MSG SIZE  rcvd: 241
+
+```
+
+#### 5.3.3 NodePort类型
+
+之前的两个类型service只有在集群内部可以访问，如果希望将service暴露给集群外部使用，就要使用到另外一种类型的service，称为NodePort类型
+
+NodePort类型的工作原理就是将service端口映射到Node的一个端口上，然后就可以通过NodeIp:NodePort来访问service了
+
+<img src="./assets/image-20240803094149289.png" alt="image-20240803094149289" style="zoom:80%;" />
+
+**创建NodePort类型service**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-headless
+  namespace: dev
+spec:
+  selector:
+    app: nginx-pod
+  type: NodePort
+  ports: 
+  - port: 80
+    targetPort: 80
+    nodePort: 30002    # 指定绑定的node端口，默认范围是30000-32767，如果不指定会在这个范围内随机分配
+```
+
+```powershell
+##查看nodeport类型service信息
+[root@k8s-master kubernetes]# kubectl apply -f service-nodeport.yaml 
+service/service-nodeport created
+[root@k8s-master kubernetes]# kubectl get svc -n dev
+NAME               TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE
+service-nodeport   NodePort   10.96.218.9   <none>        80:30002/TCP   16s
+[root@k8s-master kubernetes]# kubectl describe service service-nodeport -n dev
+Name:                     service-nodeport
+Namespace:                dev
+Labels:                   <none>
+Annotations:              <none>
+Selector:                 app=nginx-pod
+Type:                     NodePort
+IP Families:              <none>
+IP:                       10.96.218.9
+IPs:                      10.96.218.9
+Port:                     <unset>  80/TCP
+TargetPort:               80/TCP
+NodePort:                 <unset>  30002/TCP
+Endpoints:                192.168.235.245:80,192.168.235.246:80,192.168.235.247:80
+Session Affinity:         None
+External Traffic Policy:  Cluster
+Events:                   <none>
+```
+
+可以在浏览器中通过node ip:port的方式访问服务
+
+## 六、Ingress
+
+如果想要将service对集群之外的服务暴露，主要有两种方式：NodePort类型的service和LB类型的service，这两种方式都有一定的缺点：
+
++ NodePort方式的缺点是会占用很多集群机器的端口，那么当集群服务变多的时候，这个缺点就会愈发明显
++ LB方式的缺点就是每个Service需要一个LB，浪费，麻烦，并且需要k8s之外的设备支持
+
+基于这种现状，k8s提供了Ingress资源对象，只需要一个NodePort或者一个LB就可以满足暴露多个service的需求
+
+<img src="./assets/image-20240803095726212.png" alt="image-20240803095726212" style="zoom:80%;" />
+
+实际上，Ingress相当与一个7层的负载均衡器，是k8s对反向代理的一个抽象，它的工作原理类似于Nginx，可以理解成在Ingress里建立诸多映射规则，Ingress Controller通过监听这些配置规则并转换成Nginx的反向代理配置，然后对外部提供服务
+
++ `Ingress`：是k8s中的一个资源对象，作用是定义请求如何转发到service的规则
++ `Ingress Controller`：具体实现反向代理及负载均衡的程序，对ingress定义的规则进行解析，根据配置的规则来实现请求转发，实现方式有很多，比如Nginx，Contour，Haproxy等等
+
+Ingress的工作原理：
+
++ 用户编写Ingress规则，说明哪个域名对应k8s集群中的哪个service
++ Ingress控制器动态感知Ingress服务规则的变化，然后生成一段对应的反向代理配置(比如Nginx配置)
++ Ingress控制器会将生成的nginx配置写入到一个运行着的Nginx服务中，并动态更新
++ 到此为止，其实真正在工作的就是一个nginx，内部配置了用户定义的请求转发规则
+
+<img src="./assets/image-20240803100205527.png" alt="image-20240803100205527" style="zoom:80%;" />
+
+**前置准备，安装Ingress Controller**
+
+```powershell
+##获取mandatory.yaml和service-nodeport.yaml
+[root@k8s-master kubernetes]# kubectl apply -f mandatory.yaml
+
+[root@k8s-master kubernetes]# kubectl apply -f service-nodeport.yaml
+
+##查看ingress-nginx
+[root@k8s-master kubernetes]# kubectl get pod -n ingress-nginx
+
+```
+
+**Http代理**
+
+
+
+
+
+**Https代理**
+
+## 七、数据存储
+
+k8s中容器的生命周期可能很短，会被频繁的创建和销毁，那么容器在销毁时，保存在容器中的数据也会被清除，这种结果对用户来说是不愿意被看到的，为了持久化保存容器的数据，k8s引入了Volume的概念
+
+Volume是pod中能够被多个容器访问的共享目录，它被定义在Pod上，然后被一个Pod里的多个容器挂载到具体的文件目录下，k8s通过Volume实现同一个Pod中不同容器之间的数据共享以及数据的持久化存储。Volume的生命周期可以不与Pod中单个容器的生命周期相关，当容器终止或者重启时，Volume中的数据也不会丢失
+
+k8s的Volume支持多种类型，比较常见的有几个：
+
++ 简单存储：`EmptyDir`，`HostPath`，`NFS`
++ 高级存储：`PV`，`PVC`
++ 配置存储：`ConfigMap`，`Secret`
+
+### 7.1 EmptyDir
+
+EmptyDir是最基础的Volume类型，一个EmptyDir就是Host上的一个空目录
+
+EmptyDir是在Pod被分配到Node时创建的，它的初始内容为空，并且无须指定宿主机上对应的目录文件，因为k8s会自动分配一个目录，当Pod销毁时，EmptyDir中的数据也会被永久删除，EmptyDir用途如下：
+
++ 临时空间，例如用于某些应用程序运行时所需的临时目录，且无须永久保留
++ 一个容器需要从另一个容器中获取数据的目录
+
+EmptyDir示例：
+
+在一个Pod中启动两个容器：nginx和busybox，然后声明一个Volume分别挂载到两个容器的目录中，然后nginx容器负责向Volume写日志，busybox中通过命令将日志内容读到控制台
+
+<img src="./assets/image-20240804085723569.png" alt="image-20240804085723569" style="zoom:80%;" />
+
+**创建pod**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: volume-emptydir
+  namespace: dev
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.18.0
+    ports:
+    - containerPort: 80
+    volumeMounts:   #将logs-volume挂载到nginx容器中，对应的目录为/var/log/nginx
+    - name: logs-volume
+      mountPath: /var/log/nginx
+  - name: buxybox
+    image: busybox:1.30
+    command: ["/bin/sh", "-c", "tail -f /logs/access.log"]   #初始命令，动态读取指定文件中的内容
+    volumeMounts:
+    - name: logs-volume
+      mountPath: /logs
+  volumes:     #声明volume，name为logs-volume，类型为emptyDir
+  - name: logs-volume
+    emptyDir: {}
+```
+
+```powershell
+[root@k8s-master kubernetes]# kubectl apply -f volume-emptydir.yaml 
+pod/volume-emptydir created
+
+[root@k8s-master kubernetes]# kubectl get pod -n dev -o wide
+NAME              READY   STATUS    RESTARTS   AGE     IP                NODE       NOMINATED NODE   READINESS GATES
+volume-emptydir   2/2     Running   0          2m30s   192.168.113.129   k8s-node   <none>           <none>
+
+##通过podIp访问一下nginx
+[root@k8s-master kubernetes]# curl 192.168.235.248
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+    body {
+        width: 35em;
+        margin: 0 auto;
+        font-family: Tahoma, Verdana, Arial, sans-serif;
+    }
+</style>
+</head>
+<body>
+<h1>Welcome to nginx!</h1>
+<p>If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.</p>
+
+<p>For online documentation and support please refer to
+<a href="http://nginx.org/">nginx.org</a>.<br/>
+Commercial support is available at
+<a href="http://nginx.com/">nginx.com</a>.</p>
+
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+#查看挂载的目录日志
+[root@k8s-master kubernetes]# kubectl logs -f volume-emptydir -n dev -c busybox
+8.149.130.133 - - [04/Aug/2024:01:18:55 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.61.1" "-"
+
+```
+
+
+
+### 7.2 HostPath
+
+EmptyDir中的数据不会被持久化，会随着Pod的结束而销毁，如果想简单的将数据持久化到主机中，可以选择HostPath
+
+HostPath就是将Node主机中一个实际目录挂载到Pod中，以供容器使用，这样的设计就可以保证Pod销毁了，但是数据依然可以存在与Node主机上
+
+<img src="./assets/image-20240804092034712.png" alt="image-20240804092034712" style="zoom:80%;" />
+
+**创建pod**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: volume-emptydir
+  namespace: dev
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.18.0
+    ports:
+    - containerPort: 80
+    volumeMounts:   #将logs-volume挂载到nginx容器中，对应的目录为/var/log/nginx
+    - name: logs-volume
+      mountPath: /var/log/nginx
+  - name: buxybox
+    image: busybox:1.30
+    command: ["/bin/sh", "-c", "tail -f /logs/access.log"]   #初始命令，动态读取指定文件中的内容
+    volumeMounts:
+    - name: logs-volume
+      mountPath: /logs
+  volumes:     #声明volume，name为logs-volume，类型为emptyDir
+  - name: logs-volume
+    hostPath:
+      path: /root/logs
+      type: DirectoryOrCreate   #目录存在则使用，不存在则创建
+```
+
+> `type`:
+>
+> + `DirectoryOrCreate`： 目录存在则使用，不存在则创建
+> + `Directory`：目录存在，不存在则报错
+> + `FileOrCreate`：文件存在就使用，不存在则创建
+> + `File`：文件必须存在
+> + `Socket`：unix套接字
+> + `CharDevice`：字符设备
+> + `BlockDevice`：块设备
+
+
+
+```powershell
+[root@k8s-master kubernetes]# kubectl create -f volume-hostpath.yaml 
+pod/volume-emptydir created
+
+[root@k8s-master kubernetes]# kubectl get pod -n dev -o wide
+NAME              READY   STATUS    RESTARTS   AGE   IP                NODE         NOMINATED NODE   READINESS GATES
+volume-emptydir   2/2     Running   1          31s   192.168.235.249   k8s-master   <none>           <none>
+
+#查看在节点上挂载的目录
+[root@k8s-master kubernetes]# cd /root/logs
+[root@k8s-master logs]# ls
+access.log  error.log
+##另起一个终端多次访问nginx
+[root@k8s-master ~]# curl 192.168.235.249
+...
+[root@k8s-master ~]# curl 192.168.235.249
+...
+
+[root@k8s-master logs]# tail -f access.log 
+8.149.130.133 - - [04/Aug/2024:01:26:14 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.61.1" "-"
+8.149.130.133 - - [04/Aug/2024:01:26:43 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.61.1" "-"
+
+#删除pod
+[root@k8s-master kubernetes]# kubectl delete -f volume-hostpath.yaml 
+pod "volume-emptydir" deleted
+
+#再次查看挂载的目录 文件和内容仍然存在
+[root@k8s-master kubernetes]# tail -f /root/logs/access.log 
+8.149.130.133 - - [04/Aug/2024:01:26:14 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.61.1" "-"
+8.149.130.133 - - [04/Aug/2024:01:26:43 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.61.1" "-"
+```
+
+### 7.3 NFS
+
+HostPath可以解决数据持久化的问题，但是一旦Node节点故障了，Pod转移到了别的节点，之前存储的数据在新的Node仍然找不到，则又会出现问题，此时需要准备单独的网络存储系统，比较常用的时NFS和CIFS等
+
+NFS时一个网络文件存储系统，可以搭建一台NFS服务器，然后将Pod中的存储直接连接到NFS系统上，这样的话，无论Pod在节点上怎么转移，只要Node跟NFS的对接没有问题，数据就可以成功访问
+
+<img src="./assets/image-20240804093607059.png" alt="image-20240804093607059" style="zoom:80%;" />
+
+**创建pod**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: volume-emptydir
+  namespace: dev
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.18.0
+    ports:
+    - containerPort: 80
+    volumeMounts:   #将logs-volume挂载到nginx容器中，对应的目录为/var/log/nginx
+    - name: logs-volume
+      mountPath: /var/log/nginx
+  - name: buxybox
+    image: busybox:1.30
+    command: ["/bin/sh", "-c", "tail -f /logs/access.log"]   #初始命令，动态读取指定文件中的内容
+    volumeMounts:
+    - name: logs-volume
+      mountPath: /logs
+  volumes:     #声明volume，name为logs-volume，类型为emptyDir
+  - name: logs-volume
+    nfs:
+      server: xx.xx.xx.xx    #nfs服务器的地址
+      path: /data/nfs   #nfs共享文件的目录
+```
+
+### 7.4 PV和PVC
+
+PV(`Persistent Volume`)是持久化卷的意思，是对**底层的共享存储的一种抽象**，一般情况下PV由k8s管理员进行创建和配置，它与底层具体的共享存储技术有关，并通过插件完成与共享存储的对接
+
+
+
+PVC(`Persistent Volume Claim`)是持久卷声明的意思，是用户对于存储需求的一种声明，PVC其实就是用户向k8s系统发出的一种资源需求的申请
+
+<img src="./assets/image-20240804095400810.png" alt="image-20240804095400810" style="zoom:80%;" />
+
+
+
+## 附录
+
+### k8s部署springboot项目
+
+将开发完成的springboot项目打成jar包，并编写一个Dockerfile
+
+```dockerfile
+FROM openjdk:11-jre
+MAINTAINER progZhou
+ADD ./chinese-valentine.jar  /app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+EXPOSE 8080
+```
+
+将打包好的docker镜像上传到阿里云镜像仓库中
+
+```powershell
+docker login xxx xxx
+
+docker tag 刚打好的镜像id registry.cn-hangzhou.aliyuncs.com/镜像目录:version
+
+docker push registry.cn-hangzhou.aliyuncs.com/镜像目录:version
+```
+
+编写yaml文件
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment #部署
+metadata:
+  name: springboot-app
+  namespace: dev
+spec:
+  replicas: 2 #2个副本
+  selector:
+    matchLabels:
+      app: springboot-app
+  template:
+    metadata:
+      labels:
+        app: springboot-app
+    spec:
+      containers:
+      - name: springboot-app
+        image: registry.cn-hangzhou.aliyuncs.com/progzhou/chinesevalentine:1.0 #刚刚push到阿里云上的镜像地址
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080 #默认springboot端口
+      nodeName: k8s-master
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot-service
+  namespace: dev
+spec:
+  selector:
+    app: springboot-app #选中上面的 Deployment
+  ports:
+  - port: 8080 #对外暴露的端口
+    targetPort: 8080
+---
+#如果想要在浏览器访问，需要ingress-nginx配置
+```
+
+创建pod
+
+```powershell
+kubectl apply -f xxx.yaml
+```
+
