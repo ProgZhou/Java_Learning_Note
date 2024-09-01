@@ -3151,3 +3151,198 @@ spec:
 kubectl apply -f xxx.yaml
 ```
 
+
+
+### Helm
+
+**1. 为什么使用Helm**
+
+- Kubernetes 上的应用对象，都是由特定的资源描述组成，包括 Deployment、Service 等，都保存在各自的文件中或者集中写在一个配置文件(xxx.yaml)，然后通过 `kubectl apply -f` 部署。 
+
+-  如果应用只由一个或几个这样的服务组成，上面的部署方式就足够了。 
+
+-  但是对于一个复杂的应用，会有很多类似上面的资源描述文件，如：微服务架构应用，组成应用的服务可能多达几十、上百个，如果有更新或回滚应用的需求，可能要修改和维护所涉及到大量的资源文件，而这种组织和管理应用的方式就显得力不从心了。并且由于缺少对发布过的应用进行版本管理和控制，使得 Kubernetes 上的应用维护和更新面临诸多的挑战，主要面临以下的问题： 
+
+  ① 如何将这些服务作为一个整体管理？
+
+  ② 这些资源文件如何高效复用？
+
+  ③ 应用级别的版本如何管理？
+
+**2. 什么是Helm**
+
+Helm是 Kubernetes 的包管理工具，就像 Linux 下的包管理器，如：yum、apt 等，可以很方便的将之前打包好的 yaml 文件部署到 Kubernetes 上。
+
+> https://helm.sh/zh/  helm中文官网
+
+**3. Helm的基本操作**
+
+当安装好helm之后，可以添加一个chart仓库；可以从[Artifact Hub](https://artifacthub.io/packages/search?kind=0)中查找有效的Helm Chart仓库
+
+```powershell
+[root@k8s-master ~]# helm repo add bitnami https://charts.bitnami.com/bitnami
+"bitnami" has been added to your repositories
+#查看添加的所有chart仓库
+[root@k8s-master ~]# helm repo list
+NAME   	URL                                                   
+apisix 	https://charts.apiseven.com                           
+aliyun 	https://kubernetes.oss-cn-hangzhou.aliyuncs.com/charts
+bitnami	https://charts.bitnami.com/bitnami 
+#查看可安装下载的chart列表
+[root@k8s-master ~]# helm search repo aliyun
+NAME                          	CHART VERSION	APP VERSION  	DESCRIPTION                                       
+aliyun/acs-engine-autoscaler  	2.1.3        	2.1.1        	Scales worker nodes within agent pools            
+aliyun/aerospike              	0.1.7        	v3.14.1.2    	A Helm chart for Aerospike in Kubernetes          
+aliyun/anchore-engine         	0.1.3        	0.1.6        	Anchore container analysis and policy evaluatio...
+aliyun/artifactory            	7.0.3        	5.8.4        	Universal Repository Manager supporting all maj...
+aliyun/artifactory-ha         	0.1.0        	5.8.4        	Universal Repository Manager supporting all maj...
+...
+```
+
+安装chart示例：可以通过`helm install`命令安装chart，Helm可以通过多种途径查找和安装chart
+
+```powershell
+#更新各个chart仓库  确保可以拿到最新的chart列表
+[root@k8s-master ~]# helm repo update
+Hang tight while we grab the latest from your chart repositories...
+...Successfully got an update from the "aliyun" chart repository
+...Successfully got an update from the "apisix" chart repository
+...Successfully got an update from the "bitnami" chart repository
+Update Complete. ⎈Happy Helming!⎈
+[root@k8s-master ~]# helm install bitnami/mysql --generate-name
+NAME: mysql-1724547140
+LAST DEPLOYED: Sun Aug 25 08:52:24 2024
+NAMESPACE: default
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+CHART NAME: mysql
+CHART VERSION: 11.1.15
+APP VERSION: 8.4.2
+...
+```
+
+每当执行`helm install`的时候，都会创建一个新的发布版本，所以，一个chart在同一个集群中可以被安装多次，每一个都可以被独立的管理和升级
+
+可以使用`helm show chart chartname`简单浏览这个chart的基本信息；或者可以执行`helm show all chartname`获取chart的所有信息
+
+可以使用`helm uninstall `命令卸载一个版本的chart
+
+```powershell
+[root@k8s-master ~]# helm list
+NAME            	NAMESPACE	REVISION	UPDATED                                	STATUS  	CHART        	APP VERSION
+mysql-1724547140	default  	1       	2024-08-25 08:52:24.344082626 +0800 CST	deployed	mysql-11.1.15	8.4.2      
+[root@k8s-master ~]# helm uninstall mysql-1724547140
+release "mysql-1724547140" uninstalled
+```
+
+该命令会从Kubernetes卸载 `mysql-1724547140`， 它将删除和该版本相关的所有相关资源（service、deployment、 pod等等）甚至版本历史。
+
+**4. Helm的三大概念**
+
++ `Chart`：*Chart* 代表着 Helm 包。它包含在 Kubernetes 集群内部运行应用程序，工具或服务所需的所有资源定义。你可以把它看作是 Homebrew formula，Apt dpkg，或 Yum RPM 在Kubernetes 中的等价物
++ `Repository`：*Repository（仓库）* 是用来存放和共享 charts 的地方。它就像 Perl 的 [CPAN 档案库网络](https://www.cpan.org/) 或是 Fedora 的 [软件包仓库](https://src.fedoraproject.org/)，只不过它是供 Kubernetes 包所使用的
++ `Release`：*Release* 是运行在 Kubernetes 集群中的 chart 的实例。一个 chart 通常可以在同一个集群中安装多次。每一次安装都会创建一个新的 *release*。以 MySQL chart为例，如果你想在你的集群中运行两个数据库，你可以安装该chart两次。每一个数据库都会拥有它自己的 *release* 和 *release name*
+
+> Helm 安装 *charts* 到 Kubernetes 集群中，每次安装都会创建一个新的 *release*。你可以在 Helm 的 chart *repositories* 中寻找新的 chart
+
+Helm自带一个搜索命令，可以从两种来源中进行搜索：
+
+- `helm search hub` 从 [Artifact Hub](https://artifacthub.io/) 中查找并列出 helm charts。 Artifact Hub中存放了大量不同的仓库。
+- `helm search repo` 从添加（使用 `helm repo add`）到本地 helm 客户端中的仓库中进行查找。该命令基于本地数据进行搜索，无需连接互联网。
+
+默认会展示仓库中的所有chart
+
+**5. Helm基本命令**
+
+`helm install [release name] [chart name] [--generate-name]`命令：安装一个新的 helm 包
+
+> --generate-name指让Helm自动生成一个release名称
+
+在安装过程中，`helm` 客户端会打印一些有用的信息，其中包括：哪些资源已经被创建，release当前的状态，以及你是否还需要执行额外的配置步骤
+
+
+
+`helm status`命令：追踪 release 的状态，或是重新读取配置信息
+
+**自定义chart**
+
+使用`helm install`命令只会使用chart的默认配置项，很多时候，需要自定义chart来指定需要的配置
+
+使用 `helm show values` 可以查看 chart 中的可配置选项
+
+**更新chart**
+
+当想升级到 chart 的新版本，或是修改 release 的配置，可以使用 `helm upgrade` 命令。
+
+一次升级操作会使用已有的 release 并根据你提供的信息对其进行升级。由于 Kubernetes 的 chart 可能会很大而且很复杂，Helm 会尝试执行最小侵入式升级。即它只会更新自上次发布以来发生了更改的内容
+
+现在，假如在一次发布过程中，发生了不符合预期的事情，也很容易通过 `helm rollback [RELEASE] [REVISION]` 命令回滚到之前的发布版本
+
+```powershell
+helm rollback happy-panda 1
+```
+
+上面这条命令将我们的 `happy-panda` 回滚到了它最初的版本。release 版本其实是一个增量修订（revision）。 每当发生了一次安装、升级或回滚操作，revision 的值就会加1。第一次 revision 的值永远是1。我们可以使用 `helm history [RELEASE]` 命令来查看一个特定 release 的修订版本号
+
+**Helm的一般操作**
+
+- `helm search`:   搜索chart
+- `helm pull`:    下载chart到本地目录查看
+- `helm install`:   上传chart到Kubernetes
+- `helm list`:     列出已发布的chart
+
+### APISIX
+
+**什么是APISIX**
+
+Apache APISIX 是一个动态、实时、高性能的云原生 API 网关。它构建于 NGINX + ngx_lua 的技术基础之上，充分利用了 LuaJIT 所提供的强大性能
+
+APISIX 主要分为两个部分：
+
++ APISIX 核心：包括 Lua 插件、多语言插件运行时（Plugin Runner）、Wasm 插件运行时等；
++ 功能丰富的各种内置插件：包括可观测性、安全、流量控制等。
+
+APISIX 在其核心中，提供了`路由匹配、负载均衡、服务发现、API 管理`等重要功能，以及配置管理等基础性模块。除此之外，APISIX 插件运行时也包含其中，提供原生 Lua 插件的运行框架和多语言插件的运行框架，以及实验性的 Wasm 插件运行时等。APISIX 多语言插件运行时提供多种开发语言的支持，比如 Golang、Java、Python、JS 等。
+
+APISIX 目前也内置了各类插件，覆盖了 API 网关的各种领域，如认证鉴权、安全、可观测性、流量管理、多协议接入等。当前 APISIX 内置的插件使用原生 Lua 实现
+
+<img src="./assets/image-20240901085530596.png" alt="image-20240901085530596" style="zoom:80%;" />
+
+**APISIX的部署**
+
+本次使用Helm部署
+
+```powershell
+#添加helm仓库
+helm repo add apisix https://charts.apiseven.com
+helm repo update   #获取更新
+helm pull apisix/apisix   #下载apisix、包
+
+#解压
+tar -zxvf apisix-2.8.1.tgz
+
+#创建PV、PVC、storageClass资源
+vim pv-local.yaml
+
+vim pvc-local.yaml   #pvc需要创建在指定的namespace下
+
+vim storageClass.yaml
+
+#使用kubectl创建资源
+kubectl create ns apisix  #创建apisix命名空间
+kubectl apply -f pv-local.yaml,pvc-local.yaml,storageClass.yaml
+kubectl get pv,sc  #查看创建的资源
+kubectl get pvc -n apisix
+
+#编写覆写的yaml
+vim values.override.yaml
+
+
+#安装
+helm -n apisix install apisix -f ./apisix/values.override.yaml ./apisix
+
+#查看apisix状态
+```
+
